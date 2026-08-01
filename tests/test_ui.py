@@ -19,6 +19,7 @@ import json
 import shutil
 import socket
 import sys
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -326,6 +327,143 @@ class TheConsoleListensNowhereElse(unittest.TestCase):
         self.assertTrue(where.startswith("http://127.0.0.1:"))
         self.assertIn(f"/#t={KEY}", where)
         self.assertNotIn("?", where)
+
+
+class TheCommittedConsoleIsWhatItsSourceBuilds(unittest.TestCase):
+    """The built console is committed, and that is two ways to be wrong.
+
+    **Stale** — somebody changed `ui/` and did not rebuild, so what ships is not what the
+    source says. Nothing looks broken; it is simply the wrong console. **Tampered** —
+    somebody edited the minified bundle to fix something quickly, and now the source can
+    never reproduce it and the next honest build silently reverts the fix.
+
+    Asserted here, in Python, on purpose: the people who work on this repo are Python
+    contributors, and a guard that only runs where Node is installed is one most of them
+    will never see. CI rebuilds and compares the bytes as well; this is what catches it
+    first, and locally.
+    """
+
+    def setUp(self):
+        self.dist = Path(ui.DIST)
+        if not (self.dist / "build-info.json").is_file():
+            # A checkout that has never built the console is a normal state — the module
+            # already refuses honestly, and there is nothing here to check.
+            self.skipTest("this checkout has no built console")
+        self.built = json.loads((self.dist / "build-info.json").read_text())
+
+    def test_every_file_that_shipped_is_the_file_that_was_built(self):
+        import hashlib
+
+        for named, recorded in sorted(self.built["files"].items()):
+            with self.subTest(file=named):
+                at = self.dist / named
+                self.assertTrue(at.is_file(), f"{named} was recorded and is not there")
+                measured = hashlib.sha256(at.read_bytes()).hexdigest()
+                self.assertEqual(recorded, f"sha256:{measured}",
+                                 f"{named} is not the file the build produced")
+
+    def test_nothing_shipped_that_the_build_did_not_produce(self):
+        # The other direction. A file added by hand would otherwise sit there unnamed.
+        found = {str(at.relative_to(self.dist)) for at in self.dist.rglob("*")
+                 if at.is_file() and at.name != "build-info.json"}
+        self.assertEqual(set(self.built["files"]), found)
+
+    def test_the_console_that_shipped_was_built_from_the_source_beside_it(self):
+        """The stale check. Recomputed the way the stamp computes it, or it proves nothing."""
+        import hashlib
+
+        workspace = Path(ui.DIST).resolve().parent.parent.parent / "ui"
+        if not workspace.is_dir():
+            self.skipTest("this install carries no workspace, only the built console")
+        not_source = {"node_modules", "dist", ".vite", ".git"}
+        sources = []
+        for at in sorted(workspace.rglob("*")):
+            parts = set(at.relative_to(workspace).parts)
+            if not at.is_file() or not_source & parts or at.name.startswith(".env"):
+                continue
+            sources.append(at.relative_to(workspace).as_posix())
+        measured = hashlib.sha256("".join(
+            f"{named}\0{hashlib.sha256((workspace / named).read_bytes()).hexdigest()}\n"
+            for named in sorted(sources)).encode()).hexdigest()
+        self.assertEqual(
+            self.built["sources_sha256"], measured,
+            "the committed console is not what ui/ builds — run: npm run --prefix ui build")
+
+    def test_the_console_that_shipped_belongs_to_this_release(self):
+        self.assertEqual(__version__, self.built["ui_version"])
+
+    def test_the_page_asks_only_for_files_that_shipped_with_it(self):
+        # A page referring to something absent is a console that half-loads, and the
+        # first anyone hears of it is a blank panel.
+        import re as _re
+
+        page = (self.dist / "index.html").read_text()
+        for asked in _re.findall(r'(?:src|href)="([^"]+)"', page):
+            if asked.startswith(("http://", "https://", "data:", "//")):
+                continue
+            with self.subTest(asked=asked):
+                self.assertTrue((self.dist / asked.lstrip("./")).is_file(),
+                                f"the page asks for {asked} and it is not there")
+
+
+class TheAddressReachesWhoeverStartedIt(unittest.TestCase):
+    """The one case that runs the real command, because the fault is in the plumbing.
+
+    Nothing a stand-in can show: `answered` is not involved, and neither is the server.
+    What went wrong is that Python buffers stdout in blocks when it is not a terminal, and
+    a command that then serves forever never fills the buffer — so the address arrived
+    only when the process was killed, which is exactly when it stops being useful.
+    """
+
+    def test_the_address_is_readable_before_the_console_has_stopped(self):
+        import os
+        import subprocess
+
+        repo = Path(__file__).resolve().parent.parent
+        # A station of its own, so nothing here reads or writes the owner's install.
+        station = Path(tempfile.mkdtemp(prefix="rundesk-ui-station-"))
+        self.addCleanup(shutil.rmtree, station, ignore_errors=True)
+        # A console of its own too, so this passes in a checkout that never built one.
+        dist = station / "dist"
+        dist.mkdir()
+        (dist / "index.html").write_text("<title>rundesk</title>")
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith("RUNDESK_")}
+        env.update({
+            "RUNDESK_INSTALL_DIR": str(station), "RUNDESK_DATA_DIR": str(station / "data"),
+            "RUNDESK_BACKUP_DIR": str(station / "backups"),
+            "RUNDESK_JOBS_DIR": str(station / "jobs"),
+            "RUNDESK_JOB_PREFIX": "ai.rundesk-station",
+            "RUNDESK_UI_NO_BROWSER": "1",
+            # Point the module at the console this case made, so a checkout with none
+            # still runs it. Read where `DIST` is read, which is why it can be given.
+            "PYTHONPATH": str(repo / "src"),
+        })
+        started = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys; from rundesk import cli, ui; "
+             f"ui.DIST = __import__('pathlib').Path({str(dist)!r}); "
+             "sys.exit(cli.main(['ui', '--port', '0', '--no-open']))"],
+            cwd=str(repo), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: [s.close() for s in (started.stdout, started.stderr) if s])
+        self.addCleanup(started.wait)
+        self.addCleanup(started.kill)
+
+        # **Read on a thread with a bound, rather than straight.** Without the flush this
+        # line never arrives at all, and a case that waited for it would hang — holding
+        # the whole gate open rather than failing it. A bounded read turns the same fault
+        # into a failure somebody can read.
+        said: list = []
+        reader = threading.Thread(
+            target=lambda: said.append(started.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(20.0)
+        self.assertTrue(said, "the address never arrived while the console was serving")
+        self.assertIn("the console is at http://127.0.0.1:", said[0])
+        self.assertIn("/#t=", said[0])
+        self.assertIsNone(started.poll(), "it printed the address and then stopped")
 
 
 def ui_not_available() -> int:

@@ -1,0 +1,8 @@
+# The workspace's own machinery. The BUILD OUTPUT is not here — it is
+# ../src/ui/dist, and it is committed on purpose: that is what lets an install need
+# no Node, no package manager and no build step.
+node_modules/
+.vite/
+dist/
+*.tsbuildinfo
+.env*.local

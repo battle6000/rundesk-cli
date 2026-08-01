@@ -156,7 +156,8 @@ class FastPullRequestFeedback(unittest.TestCase):
     def test_one_stable_check_collects_every_required_pr_job(self):
         self.assertIn("required-pr-gate:", self.workflow)
         self.assertIn(
-            "needs: [knowledge, tests, install-this-checkout, upgrade-existing-install]",
+            "needs: [knowledge, tests, install-this-checkout, upgrade-existing-install,"
+            " ui-dist-matches-its-source]",
             self.workflow,
         )
 

@@ -1,0 +1,132 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ------------------------------------------------------------------------- the palette
+
+   **The only file in this project that contains a colour.** Everything else names a
+   token, which is what makes adding a light theme later one block here and no component
+   changes at all — and it is what keeps two panels from drifting apart because somebody
+   typed a grey.
+
+   `:root` carries the same values as `.dark` on purpose. Dark is the only theme that
+   ships, so a lost class has to degrade to correct rather than to a flash of white while
+   the page is still arriving.
+
+   Borders are **white at low alpha** rather than a fixed grey. That is the whole trick
+   that makes near-black look layered: one token then sits correctly on the page and on a
+   panel above it, and every edge in the console reads at the same weight. */
+:root,
+.dark {
+  color-scheme: dark;
+
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.196 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.225 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.62 0.2 25);
+  --destructive-foreground: oklch(0.985 0 0);
+
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.62 0.19 256 / 70%);
+
+  /* ------------------------------------------------------------- the console's own
+
+     One accent, used for the three things that mean "this one": the active tab, a
+     granted skill, and where the keyboard is. */
+  --rd-accent: oklch(0.62 0.19 256);
+  --rd-accent-foreground: oklch(0.985 0 0);
+  --rd-accent-soft: oklch(0.62 0.19 256 / 15%);
+
+  /* A gateway's three states. Named for the state and not the colour, so a badge that
+     needs a fourth does not have to invent a vocabulary. */
+  --rd-running: oklch(0.74 0.17 152);
+  --rd-running-soft: oklch(0.74 0.17 152 / 14%);
+  --rd-wedged: oklch(0.79 0.16 78);
+  --rd-wedged-soft: oklch(0.79 0.16 78 / 14%);
+  --rd-stopped: oklch(0.62 0 0);
+  --rd-stopped-soft: oklch(1 0 0 / 8%);
+
+  --radius: 0.5rem;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui,
+    sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-rd-accent: var(--rd-accent);
+  --color-rd-accent-foreground: var(--rd-accent-foreground);
+  --color-rd-accent-soft: var(--rd-accent-soft);
+  --color-rd-running: var(--rd-running);
+  --color-rd-running-soft: var(--rd-running-soft);
+  --color-rd-wedged: var(--rd-wedged);
+  --color-rd-wedged-soft: var(--rd-wedged-soft);
+  --color-rd-stopped: var(--rd-stopped);
+  --color-rd-stopped-soft: var(--rd-stopped-soft);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    /* App scale, not web scale. 16px reads as a website; this is a window. */
+    font:
+      400 13px/20px var(--font-sans);
+    /* A desktop window. Below this the metric strip has nowhere to go, and building a
+       second layout for a viewport nobody has is work with no user. */
+    min-width: 880px;
+  }
+
+  /* Every number that is polled is tabular, so a value changing under a three-second
+     refresh does not make the row jump sideways. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}

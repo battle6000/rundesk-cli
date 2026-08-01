@@ -1,0 +1,9 @@
+{
+  "ui_version": "0.27.2",
+  "sources_sha256": "047c3e19f5b94be980f67ea8007de1fd90f9261200f4ba17945324791543fa77",
+  "files": {
+    "assets/app.js": "sha256:7b510d4e0c05fe45dace13936d2df0efd8902ad2654f418b6db779bbad605657",
+    "assets/style.css": "sha256:051fb3fd2151390f3a6652c2d0a2b02ef262e90d487a78663b6cac9d718830a3",
+    "index.html": "sha256:44533d14839dc488af8f16677c6591fe15c948e5eb2ab1eeaa6de22de6c153c3"
+  }
+}

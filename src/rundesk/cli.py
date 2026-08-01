@@ -3243,8 +3243,13 @@ def cmd_ui(args: argparse.Namespace, console) -> int:
               file=sys.stderr)
         return 1
     where = console.address_of(server, token)
-    print(f"the console is at {where}")
-    print("        this machine only, and it stops when you do  (ctrl-c)")
+    # **Flushed, because this command then blocks forever.** Python buffers stdout in
+    # blocks whenever it is not a terminal, and serving never fills the buffer — so
+    # `rundesk ui > somewhere &`, or anything running this under a supervisor, printed
+    # the address only once the process had already been killed. The one line an owner
+    # needs was the one line they could not get.
+    print(f"the console is at {where}", flush=True)
+    print("        this machine only, and it stops when you do  (ctrl-c)", flush=True)
     if not args.no_open:
         console.open_browser(where)
     try:

@@ -478,10 +478,43 @@ jobs:
 
   # One stable required check for branch protection. Matrix job names may grow as supported
   # environments do; this name stays fixed and succeeds only when every required job did.
+  # ------------------------------------------------------------------ the committed console
+  # The console in `src/ui/dist` is built from `ui/` and committed, which is what lets an
+  # install need no Node, no package manager and no build step. That makes it the one thing
+  # in this repository whose source and shipped form can silently disagree, so it is rebuilt
+  # here and the bytes compared.
+  #
+  # **Not behind a `paths:` filter.** A `src/ui/dist` edited without touching `ui/` is
+  # exactly the case a path filter would wave through, and it is the one worth catching.
+  ui-dist-matches-its-source:
+    name: the committed console is what ui/ builds
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ui/.nvmrc
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      # `ci` and never `install`: it lays down the lockfile exactly and fails on drift,
+      # which is what makes two machines building one commit agree.
+      - run: npm ci --prefix ui
+      - run: npm run --prefix ui build
+      - name: The rebuild changed nothing that is committed
+        run: |
+          git diff --exit-code -- src/ui/dist
+          # A build that ADDS a file leaves it untracked, and `git diff` cannot see one.
+          test -z "$(git status --porcelain -- src/ui/dist)" || {
+            echo "::error::the rebuild produced files that are not committed"
+            git status --porcelain -- src/ui/dist
+            exit 1
+          }
+
   required-pr-gate:
     name: required PR gate
     if: always()
-    needs: [knowledge, tests, install-this-checkout, upgrade-existing-install]
+    needs: [knowledge, tests, install-this-checkout, upgrade-existing-install, ui-dist-matches-its-source]
     runs-on: ubuntu-latest
     steps:
       - name: Every required job passed
@@ -490,11 +523,13 @@ jobs:
           TESTS: ${{ needs.tests.result }}
           INSTALL: ${{ needs.install-this-checkout.result }}
           UPGRADE: ${{ needs.upgrade-existing-install.result }}
+          CONSOLE: ${{ needs.ui-dist-matches-its-source.result }}
         run: |
           test "$KNOWLEDGE" = success
           test "$TESTS" = success
           test "$INSTALL" = success
           test "$UPGRADE" = success
+          test "$CONSOLE" = success
 
   # ------------------------------------------------------------------ installing what is published (R-INS-1)
   # The claim the whole product rests on, and the one every other job is blind to: a machine
