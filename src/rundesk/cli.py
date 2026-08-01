@@ -2618,15 +2618,17 @@ def _list_skill_catalogs(catalogs) -> int:
     except catalogs.NotACatalog as why:
         print(f"skills: catalogs could not be read — {why}", file=sys.stderr)
         return 1
-    if not held:
-        print("no skill catalogs")
-        print("        install one:  rundesk skills install <repository>")
-        return 0
     _as_table(
         ("CATALOG", "VERSION", "SOURCE", "SKILLS"),
         [(one.name, one.version, one.source, str(len(one.manifest.skills)))
          for one in held.values()],
+        called="catalogs",
     )
+    # Below the table, as in the other listings: having none is an answer, and something
+    # reading this cannot tell a silence from a command that never ran.
+    if not held:
+        print("no skill catalogs")
+        print("        install one:  rundesk skills install <repository>")
     return 0
 
 

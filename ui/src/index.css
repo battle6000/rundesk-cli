@@ -114,6 +114,16 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* ------------------------------------------------------------------ the type floor
+
+     **Nothing is smaller than `text-xs`.** Twelve pixels is the floor, and it is not a
+     preference: a label, a badge or a caption set below it is one an owner has to lean in
+     to read, and every one of those sizes was picked to make something fit rather than to
+     be read. When a thing does not fit at twelve, the layout is what gives — not the type.
+
+     Say `text-xs`, not `text-[12px]`: one name for one size, so the scale cannot grow four
+     values nobody can keep straight. */
+
   body {
     @apply bg-background text-foreground;
     /* App scale, not web scale. 16px reads as a website; this is a window. */

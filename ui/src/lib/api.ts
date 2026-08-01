@@ -231,3 +231,47 @@ export async function readSkills(signal: AbortSignal): Promise<Skill[]> {
     agents: listed(cell(row, "agents")),
   }));
 }
+
+/** A skill catalog installed on this machine, and where it came from. */
+export type Catalog = { catalog: string; version: string; source: string };
+
+/**
+ * Where each installed catalog came from, by name.
+ *
+ * The skills listing says which catalog put a skill there and nothing more, so this is the
+ * only thing that can turn that name into somewhere to go and look.
+ */
+export async function readCatalogs(signal: AbortSignal): Promise<Record<string, Catalog>> {
+  const envelope = await asked("/api/skills/catalogs", signal);
+  const byName: Record<string, Catalog> = {};
+  for (const row of rowsOf(tablesOf(envelope, "catalogs")[0])) {
+    const named = cell(row, "catalog");
+    byName[named] = {
+      catalog: named,
+      version: cell(row, "version"),
+      source: cell(row, "source"),
+    };
+  }
+  return byName;
+}
+
+/** Where a skill came from, and whether that is somewhere a person can go and look. */
+export type Provenance =
+  | { kind: "rundesk" }
+  | { kind: "catalog"; name: string; href: string | null }
+  | { kind: "custom" };
+
+/**
+ * What a skill's `from` means, resolved against the catalogs this machine has.
+ *
+ * A catalog's source is whatever it was installed from, which is a web address only
+ * sometimes — a directory or an archive is equally allowed. Anything that is not plainly
+ * an `https` address gets no link rather than a broken one.
+ */
+export function provenanceOf(from: string, catalogs: Record<string, Catalog> | null): Provenance {
+  if (from === "rundesk") return { kind: "rundesk" };
+  if (from === "custom" || from === "-") return { kind: "custom" };
+  const source = catalogs?.[from]?.source ?? "";
+  const linkable = source.startsWith("https://");
+  return { kind: "catalog", name: from, href: linkable ? source : null };
+}

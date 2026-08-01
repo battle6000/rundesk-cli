@@ -1,10 +1,12 @@
+import { useCallback } from "react";
+
 import { Command } from "@/components/Command";
+import { ProvenanceBadge } from "@/components/Provenance";
 import { TroubleStrip, TroubleView } from "@/components/Trouble";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { useResource } from "@/hooks/useResource";
-import { readSkills } from "@/lib/api";
+import { provenanceOf, readCatalogs, readSkills } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
@@ -19,6 +21,9 @@ const SWITCH =
 
 export function SkillsTab({ agent }: { agent: string }) {
   const { data, trouble, loading, refreshing, reload } = useResource(readSkills);
+  // Read beside the skills rather than with them: a catalog that cannot be listed costs a
+  // link and nothing else, so its failure must not take the whole tab down with it.
+  const catalogs = useResource(useCallback((signal: AbortSignal) => readCatalogs(signal), []));
 
   if (trouble?.kind === "session_ended") {
     return <TroubleView trouble={trouble} onRetry={reload} busy={refreshing} />;
@@ -58,11 +63,14 @@ export function SkillsTab({ agent }: { agent: string }) {
               className="flex items-center gap-3 border-b px-4 py-2.5 last:border-b-0"
             >
               <span className="truncate font-mono text-[12.5px]">{skill.skill}</span>
-              <Badge variant="outline" className="shrink-0 text-[10.5px] font-normal">
-                {skill.from}
-              </Badge>
+              {/* Pushed to the right, so what a skill is and where it came from read as two
+                  columns rather than one run-on line, and the badge sits beside the control
+                  it qualifies. */}
+              <span className="ml-auto">
+                <ProvenanceBadge said={provenanceOf(skill.from, catalogs.data)} />
+              </span>
               <Switch
-                className={cn("ml-auto", SWITCH)}
+                className={cn(SWITCH)}
                 checked={skill.agents.includes(agent)}
                 disabled
                 aria-label={`${skill.skill} is ${skill.agents.includes(agent) ? "granted to" : "not granted to"} ${agent}`}
@@ -72,7 +80,7 @@ export function SkillsTab({ agent }: { agent: string }) {
         </ul>
       )}
 
-      <p className="mt-3 flex flex-wrap items-center gap-2 text-muted-foreground">
+      <p className="mt-3 flex flex-wrap items-center justify-center gap-2 text-muted-foreground">
         Grants are changed with
         <Command text={`rundesk skills ${agent} grant <skill>`} />
       </p>

@@ -56,7 +56,7 @@ function TabBar({ agent, current }: { agent: string; current: Tab }) {
 
 function Heading({ children }: { children: string }) {
   return (
-    <div className="border-b px-4 py-2 text-[10.5px] font-medium tracking-wide text-muted-foreground uppercase">
+    <div className="border-b px-4 py-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
       {children}
     </div>
   );
@@ -66,7 +66,7 @@ function InFlight({ working }: { working: Working[] }) {
   return (
     <section className="mt-5 overflow-hidden rounded-lg border bg-card">
       <Heading>In flight</Heading>
-      <div className={cn(IN_FLIGHT, "border-b py-1.5 text-[10.5px] tracking-wide text-muted-foreground uppercase")}>
+      <div className={cn(IN_FLIGHT, "border-b py-1.5 text-xs tracking-wide text-muted-foreground uppercase")}>
         <span>Kind</span>
         <span>Source</span>
         <span>Conversation</span>
@@ -92,7 +92,7 @@ function UnfinishedTurns({ unfinished }: { unfinished: Unfinished[] }) {
   return (
     <section className="mt-5 overflow-hidden rounded-lg border bg-card">
       <Heading>Unfinished</Heading>
-      <div className={cn(UNFINISHED, "border-b py-1.5 text-[10.5px] tracking-wide text-muted-foreground uppercase")}>
+      <div className={cn(UNFINISHED, "border-b py-1.5 text-xs tracking-wide text-muted-foreground uppercase")}>
         <span>Turn</span>
         <span>At</span>
         <span>Ended</span>

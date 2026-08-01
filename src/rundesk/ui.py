@@ -113,10 +113,15 @@ ALWAYS = {
 #:
 #: Every one of them lists something and takes `--json`. Phase one shows an install; it
 #: does not change one, which is why nothing here is anything but a reading.
+#: Each entry is the whole command, `--json` included and placed where that verb takes it.
+#: Appending the flag would have been shorter and is wrong: argparse takes an option
+#: belonging to a verb *before* the action under it, so `skills catalogs --json` is an
+#: unrecognized argument and `skills --json catalogs` is the same request accepted.
 OFFERS = {
-    ("agents",): ["agents"],
-    ("status",): ["status"],
-    ("skills",): ["skills"],
+    ("agents",): ["agents", "--json"],
+    ("status",): ["status", "--json"],
+    ("skills",): ["skills", "--json"],
+    ("skills", "catalogs"): ["skills", "--json", "catalogs"],
 }
 
 
@@ -249,7 +254,7 @@ def routed(parts: tuple[str, ...]) -> list[str] | None:
         return None
     rest = parts[1:]
     if rest in OFFERS:
-        return list(OFFERS[rest]) + ["--json"]
+        return list(OFFERS[rest])
     if len(rest) == 2 and rest[0] == "agents":
         if not A_NAME.match(rest[1]):
             raise Refused(400, "that is not a name an agent can have")

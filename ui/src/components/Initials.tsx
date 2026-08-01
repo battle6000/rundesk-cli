@@ -8,7 +8,7 @@ export function Initials({ name, large = false }: { name: string; large?: boolea
       aria-hidden
       className={cn(
         "inline-flex shrink-0 items-center justify-center rounded-full bg-secondary font-medium text-secondary-foreground",
-        large ? "size-14 text-[19px]" : "size-8 text-[11.5px]",
+        large ? "size-14 text-[19px]" : "size-8 text-xs",
       )}
     >
       {initialsOf(name)}

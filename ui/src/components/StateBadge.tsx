@@ -18,7 +18,7 @@ export function StateBadge({ state, className }: { state: string; className?: st
     <Badge
       variant="ghost"
       className={cn(
-        "gap-1.5 px-2 text-[10.5px] tracking-wide",
+        "gap-1.5 px-2 text-xs tracking-wide",
         TONES[state] ?? "bg-muted text-muted-foreground",
         className,
       )}

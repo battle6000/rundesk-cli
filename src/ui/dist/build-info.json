@@ -1,9 +1,9 @@
 {
   "ui_version": "0.27.2",
-  "sources_sha256": "348c391534f2466502860ff15742d936e0026c0e3c6ef661007a3946a86e484f",
+  "sources_sha256": "c10f8bf3b0ecb2d4a67b89d6164b7d90e06ed1c413c5e3d436ddf209210bc5b0",
   "files": {
-    "assets/app.js": "sha256:9530f67f9f37189d902c7da653573f842c4c49b2e7476dc4ef70ea2a9d642855",
-    "assets/style.css": "sha256:bbb46d05c3d4128a5ad10e79df81fabdb633643afb447958ef3d6cc28fa43e24",
+    "assets/app.js": "sha256:e58831a0305d7c32c82bdd346ed44c6cf80af13172a0f7c7a961bcb2f87af00d",
+    "assets/style.css": "sha256:358432d03169a9f5e76828a7794a1db729e59bbbabb6e5960eb56ee6286c8d83",
     "index.html": "sha256:44533d14839dc488af8f16677c6591fe15c948e5eb2ab1eeaa6de22de6c153c3"
   }
 }
