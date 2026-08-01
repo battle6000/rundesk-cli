@@ -28,6 +28,7 @@ import signal
 import subprocess
 import sys
 import threading
+import traceback
 import urllib.parse
 import webbrowser
 from dataclasses import dataclass, field
@@ -162,8 +163,16 @@ def minted() -> str:
     Made per launch, never written down, and gone when the process is. It is not a login:
     it stops a page on another origin from reaching this port through a browser, and it
     stops another person on this machine from doing so at all.
+
+    **`RUNDESK_UI_TOKEN` fixes it, for one situation only: building the console itself.**
+    A development server serves the page on a port of its own and so has no address from
+    this command to take a key out of, which without this leaves every request refused and
+    the person changing the console unable to see it. It is deliberately an environment
+    variable rather than an option: nothing a person types by accident turns it on, and a
+    key that outlives one run is exactly what the ordinary case must never have.
     """
-    return secrets.token_urlsafe(32)
+    said = os.environ.get("RUNDESK_UI_TOKEN", "").strip()
+    return said if said else secrets.token_urlsafe(32)
 
 
 def invocation(*words: str) -> list[str]:
@@ -349,6 +358,16 @@ def answered(method: str, path: str, headers, *, token: str, at: str,
     except Refused as why:
         known = {400: "forbidden", 403: "forbidden", 404: "not_found", 504: "cli_failed"}
         return _problem(why.status, known.get(why.status, "internal"), why.said)
+    except Exception as broke:
+        # **A fault here still leaves by the front door.** This is a request boundary, so
+        # the alternative is not "no answer" — it is the standard library's own error page,
+        # which is HTML, carries no reason a caller can read, and reaches an owner as a
+        # number and nothing else. What went wrong is written where a fault belongs, and
+        # said in the shape everything else here is said in.
+        traceback.print_exc()
+        return _problem(500, "internal",
+                        f"the console failed on {method} {path.split('?')[0]} — "
+                        f"{type(broke).__name__}: {broke}")
 
 
 def handler(*, token: str, dist: Path, ask, at):

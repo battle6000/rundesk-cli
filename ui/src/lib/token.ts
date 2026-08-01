@@ -18,7 +18,15 @@ const SHAPE = /^[A-Za-z0-9_-]{22,128}$/;
 export function bootstrapToken(): void {
   const fragment = /^#t=([A-Za-z0-9_-]{22,128})$/.exec(window.location.hash);
   const query = new URLSearchParams(window.location.search).get("t");
-  const minted = fragment?.[1] ?? (query && SHAPE.test(query) ? query : null);
+  // A development server serves this page on a port of its own, so there is no address
+  // from `rundesk ui` to take a key out of. **Only under `import.meta.env.DEV`**, which a
+  // production build resolves to `false` and then removes the branch entirely — so this
+  // cannot reach a built console even if the variable is set on the machine.
+  const forDev = import.meta.env.DEV ? (import.meta.env["VITE_DEV_TOKEN"] ?? null) : null;
+  const minted =
+    fragment?.[1] ??
+    (query && SHAPE.test(query) ? query : null) ??
+    (typeof forDev === "string" && SHAPE.test(forDev) ? forDev : null);
   if (!minted) return;
   sessionStorage.setItem(KEY, minted);
   // Out of the address bar, and without a history entry somebody could go "back" into.

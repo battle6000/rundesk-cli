@@ -266,6 +266,37 @@ class TheConsoleOnlyAnswersItself(unittest.TestCase):
         said = self.answer(ask=ask)
         self.assertEqual(502, said.status)
 
+    def test_a_fault_in_the_console_itself_still_leaves_by_the_front_door(self):
+        """The alternative is not silence — it is the standard library's own error page.
+
+        That page is HTML, carries no reason anything can read, and reaches an owner as a
+        number and nothing else. Reported as exactly that: a five hundred whose body said
+        nothing, which named neither the fault nor where to look for it.
+        """
+        def breaks(words):
+            raise OSError(24, "Too many open files")
+
+        said = self.answer(ask=breaks)
+        self.assertEqual(500, said.status)
+        self.assertIn("json", said.kind)
+        body = json.loads(said.body)
+        self.assertEqual("internal", body["error"])
+        # What broke, and where. Both, because either alone leaves a reader guessing.
+        self.assertIn("/api/agents", body["said"])
+        self.assertIn("OSError", body["said"])
+        self.assertIn("Too many open files", body["said"])
+
+    def test_a_fault_names_the_address_without_carrying_its_query(self):
+        # A query can hold anything somebody typed, and an error message is the last place
+        # it should be repeated back.
+        def breaks(_words):
+            raise RuntimeError("nope")
+
+        said = ui.answered("GET", "/api/agents?secret=xyzzy", told(), token=KEY, at=AT,
+                           dist=self.dist, ask=breaks)
+        self.assertEqual(500, said.status)
+        self.assertNotIn("xyzzy", json.loads(said.body)["said"])
+
     def test_a_command_that_never_answered_is_given_up_on(self):
         def never(words):
             raise ui.Refused(504, "rundesk agents did not answer within 20 seconds")

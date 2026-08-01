@@ -35,7 +35,7 @@ _working = tempfile.TemporaryDirectory(prefix="rundesk-checkout-")
 # and a job is only recognised as ours by comparing the two — so an unresolved temporary
 # directory leaves every plist looking like somebody else's, on macOS alone.
 REPO = Path(_working.name).resolve() / CHECKOUT.name
-shutil.copytree(CHECKOUT, REPO, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+shutil.copytree(CHECKOUT, REPO, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
 INSTALLER = REPO / "install.sh"
 
 
@@ -389,7 +389,7 @@ class InstallTests(Sandbox):
         # An installer that reports done and leaves something that cannot run is the worst of
         # both: nothing to debug, and a command on your PATH that fails.
         broken = self.root / "broken-checkout"
-        shutil.copytree(REPO, broken, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        shutil.copytree(REPO, broken, ignore=shutil.ignore_patterns(".git", "__pycache__", "node_modules"))
         (broken / "rundesk").write_text("#!/usr/bin/env python3\nraise SystemExit(9)\n")
         (broken / "rundesk").chmod(0o755)
 
@@ -686,7 +686,7 @@ class DependencyTests(Sandbox):
         before it.
         """
         clone = self.root / "checkout"
-        shutil.copytree(REPO, clone, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, clone, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         return clone
 
     def installing_into(self, clone: Path, requirements: Path) -> subprocess.CompletedProcess:
@@ -759,7 +759,7 @@ class DependencyTests(Sandbox):
         replace it without asking. So removal takes it: left behind it is a piece of rundesk
         on a machine somebody removed rundesk from."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         library = self.home / ".rundesk" / "data" / "skills"
         shipped = sorted(one.name for one in (REPO / "src" / "templates" / "skills").iterdir()
                          if (one / "SKILL.md").is_file())
@@ -785,7 +785,7 @@ class DependencyTests(Sandbox):
         """
         scratch = self.root / "scratch"
         made = scratch / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
 
         shipped = next(one.name for one in (REPO / "src" / "templates" / "skills").iterdir()
                        if (one / "SKILL.md").is_file())
@@ -836,7 +836,7 @@ class DependencyTests(Sandbox):
         tell an owner to copy one under another name to make it theirs, and that promise is
         worth exactly as much as this case."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         library = self.home / ".rundesk" / "data" / "skills"
         (library / "mine").mkdir(parents=True)
         (library / "mine" / "SKILL.md").write_text("---\nname: mine\n---\n")
@@ -854,7 +854,7 @@ class DependencyTests(Sandbox):
         empty, so the install directory could never go and an uninstall that said it had
         left nothing had left the lot."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         library = self.home / ".rundesk" / "data" / "skills"
         library.mkdir(parents=True)
         for name in sorted(one.name for one in (REPO / "src" / "templates" / "skills").iterdir()
@@ -1115,7 +1115,7 @@ class WhatItWillNotDeleteTests(Sandbox):
         # The other half of the same bug: a contributor who clones to ~/.rundesk should get
         # an install from that clone, not a download that replaces it.
         clone = self.home / ".rundesk"
-        shutil.copytree(REPO, clone, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, clone, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         (clone / ".git").mkdir()
         (clone / "MY-WORK.txt").write_text("uncommitted")
 
@@ -1201,7 +1201,7 @@ class FakesTheFetch:
 
     def release_archive(self) -> Path:
         source = self.root / "rundesk-cli-v9.9.9"
-        shutil.copytree(REPO, source, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, source, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         tarball = self.root / "release.tar.gz"
         subprocess.run(["tar", "-czf", str(tarball), "-C", str(self.root), source.name], check=True)
         return tarball
@@ -1525,7 +1525,7 @@ class DownloadedInstallTests(Sandbox):
         # indistinguishable from a clone, unless the one thing that tells them apart is
         # checked: whether it is the directory the installer was told to create.
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         (self.bindir).mkdir(parents=True, exist_ok=True)
         (self.bindir / "rundesk").symlink_to(made / "rundesk")
 
@@ -1543,7 +1543,7 @@ class DownloadedInstallTests(Sandbox):
         of names to keep, and a list is a thing that stops being true the day something is added
         beside it — `rm -rf "$INSTALL_DIR"` had already taken every gateway log once."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         theirs = self.home / ".rundesk"
         (theirs / "agents" / "ava" / "home").mkdir(parents=True)
         (theirs / "agents" / "ava" / "home" / "SOUL.md").write_text("mine\n")
@@ -1567,7 +1567,7 @@ class DownloadedInstallTests(Sandbox):
     def test_purging_takes_what_the_owner_keeps_as_well(self):
         """R-RM-11 — the other half, so "cannot reach it" cannot pass by never removing it."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         theirs = self.home / ".rundesk"
         (theirs / "agents" / "ava").mkdir(parents=True)
         (theirs / "agents" / "ava" / "state.db").write_text("records\n")
@@ -1582,7 +1582,7 @@ class DownloadedInstallTests(Sandbox):
         """R-RM-14 — the copies are the thing somebody reaches for after removing rundesk,
         and an ordinary uninstall has never had any business with what the owner keeps."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         copies = self.home / ".rundesk" / "backups"
         copies.mkdir(parents=True)
         (copies / "rundesk-data-2026-07-27-040000Z.zip").write_text("a copy\n")
@@ -1600,7 +1600,7 @@ class DownloadedInstallTests(Sandbox):
         the only copy of what they had. This used to be `rm -rf` over the install directory,
         which would have taken them."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         theirs = self.home / ".rundesk"
         (theirs / "data" / "agents" / "ava").mkdir(parents=True)
         (theirs / "data" / "agents" / "ava" / "state.db").write_text("records\n")
@@ -1624,7 +1624,7 @@ class DownloadedInstallTests(Sandbox):
         """R-RM-14 — listing them under "add --purge to delete them" would be a lie, and the
         one place an owner looks for how to be rid of one is the message that mentions it."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         copies = self.home / ".rundesk" / "backups"
         copies.mkdir(parents=True)
         (copies / "rundesk-data-2026-07-27-040000Z.zip").write_text("a copy\n")
@@ -1644,7 +1644,7 @@ class DownloadedInstallTests(Sandbox):
         things on different machines — and refused *before* anything is removed, or the
         message saying nothing was removed is itself untrue."""
         made = self.home / ".rundesk" / "app"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         theirs = self.home / ".rundesk"
         (theirs / "data" / "agents" / "ava").mkdir(parents=True)
         (theirs / "data" / "agents" / "ava" / "state.db").write_text("records\n")
@@ -1671,7 +1671,7 @@ class DownloadedInstallTests(Sandbox):
         it too, and the sweep that tidies that layout spares a fixed list of names. A list is
         safe only while nothing new is ever added next to it, and this is the something."""
         made = self.home / ".rundesk"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         copies = made / "backups"
         copies.mkdir()
         (copies / "rundesk-data-2026-07-27-040000Z.zip").write_text("a copy\n")
@@ -1689,7 +1689,7 @@ class DownloadedInstallTests(Sandbox):
         """R-RM-8 — somebody updating and then removing would otherwise be left with the older
         rundesk still sitting beside their agents, and still on their PATH."""
         made = self.home / ".rundesk"
-        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
+        shutil.copytree(REPO, made, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules"))
         (made / "agents" / "ava" / "home").mkdir(parents=True)
         (made / "agents" / "ava" / "home" / "SOUL.md").write_text("mine\n")
 

@@ -8,6 +8,20 @@ a long MEMORY means something was solved and never pruned.** This codebase only.
 
 *One bullet each: the trap, and the workaround. Delete when it's genuinely solved.*
 
+- **`./install.sh --uninstall` deletes this checkout's `.venv`, whatever you redirected.**
+  A checkout install symlinks the checkout, so the virtualenv it "installed for itself" is
+  the one beside your source — and `RUNDESK_INSTALL_DIR` does not move it. Measured: an
+  uninstall aimed entirely at a scratch root removed
+  `rundesk-cli/.venv` and reported success, taking the interpreter a running gate was
+  using with it. Test a station by *installing* into one and then `rm -rf`-ing it; only run
+  `--uninstall` when you mean to rebuild `.venv` afterwards. Put it back with
+  `./install.sh` under a scratch root, then take the automatic-update job back with
+  `launchctl bootout gui/$UID/<prefix>-automatic-update` before deleting the directory.
+- **`test_install` copies the whole checkout about ten times, and skipped only three
+  things.** `ignore_patterns(".git", "__pycache__", ".venv")` did not name `node_modules`,
+  so adding a JS workspace put 146 MB and 7,755 files into every copy: the suite went from
+  passing to 136 seconds to hitting the gate's 180-second ceiling. Adding `node_modules`
+  took it to 68. Any directory of packages added anywhere in this tree needs naming there.
 - **A command that serves forever prints nothing anyone can read, unless it flushes.** Python
   buffers stdout in blocks whenever it is not a terminal, and a command that then blocks never
   fills the buffer — so `rundesk ui > log &` printed its address only once the process had been

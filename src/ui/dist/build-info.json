@@ -1,8 +1,8 @@
 {
   "ui_version": "0.27.2",
-  "sources_sha256": "29ff82490fc5c28dbe3e8473a0b3380c093e8117475ba9bf153fb638f0467895",
+  "sources_sha256": "348c391534f2466502860ff15742d936e0026c0e3c6ef661007a3946a86e484f",
   "files": {
-    "assets/app.js": "sha256:94bc131c0b718821c02f4e9740f99adb055eb8f2350688dd6534fc0d133beb7e",
+    "assets/app.js": "sha256:9530f67f9f37189d902c7da653573f842c4c49b2e7476dc4ef70ea2a9d642855",
     "assets/style.css": "sha256:bbb46d05c3d4128a5ad10e79df81fabdb633643afb447958ef3d6cc28fa43e24",
     "index.html": "sha256:44533d14839dc488af8f16677c6591fe15c948e5eb2ab1eeaa6de22de6c153c3"
   }
