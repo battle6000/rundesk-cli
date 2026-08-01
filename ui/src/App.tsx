@@ -1,17 +1,44 @@
-import { getToken } from "./lib/token";
+import { useRoute } from "@/hooks/useRoute";
+import { AGENTS_HREF } from "@/lib/route";
+import { AgentDetail } from "@/views/AgentDetail";
+import { AgentList } from "@/views/AgentList";
 
-/** The console. Views land here; this is the shell that proves the seam works. */
-export function App() {
-  const held = getToken();
+/** An address this console shows nothing at. Said, rather than quietly redirected: a link
+ *  that lands somewhere else without a word is indistinguishable from one that worked. */
+function Nowhere() {
   return (
-    <main className="mx-auto max-w-5xl px-6 py-10">
-      <h1 className="text-[17px] font-medium">Rundesk</h1>
-      <p className="mt-1 text-muted-foreground">
-        The local console. This release shows your install; it does not change it.
-      </p>
-      <p className="mt-6 font-mono text-[12.5px] text-muted-foreground">
-        {held ? "this window has a key" : "this window has no key — run rundesk ui again"}
-      </p>
-    </main>
+    <div className="rounded-lg border border-dashed px-6 py-16 text-center">
+      <p className="font-medium">This console shows nothing at that address</p>
+      <a
+        href={AGENTS_HREF}
+        className="mt-3 inline-block text-muted-foreground transition-colors hover:text-foreground"
+      >
+        Back to agents
+      </a>
+    </div>
+  );
+}
+
+/** The console. One shell, and the address decides what is inside it. */
+export function App() {
+  const route = useRoute();
+  return (
+    <div className="min-h-screen">
+      <header className="border-b">
+        <div className="mx-auto flex h-12 max-w-5xl items-center gap-2.5 px-6">
+          <a href={AGENTS_HREF} className="font-medium">
+            Rundesk
+          </a>
+          <span className="text-muted-foreground">the local console</span>
+        </div>
+      </header>
+      <main className="mx-auto max-w-5xl px-6 py-8">
+        {route.at === "agents" ? <AgentList /> : null}
+        {route.at === "agent" ? (
+          <AgentDetail agent={route.agent} tab={route.tab} file={route.file} />
+        ) : null}
+        {route.at === "nowhere" ? <Nowhere /> : null}
+      </main>
+    </div>
   );
 }
