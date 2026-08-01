@@ -2735,6 +2735,151 @@ class WhatEachAgentIsDoing(unittest.TestCase):
         self.assertNotIn("SUPERVISED", said)
 
 
+def apart(argv, gateways=None, machine=None, agents=None, skills=None, scripts=None,
+          catalogs=None):
+    """The same as `drive`, with the two streams kept apart.
+
+    `drive` joins them, which is right for every case that only asks what was said. These
+    cases are about which stream a thing went down: a document meant for something reading
+    it is worth nothing if one line of a hint for a person is sitting in front of it.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = cli.main(argv, gateways=gateways or FakeGateways(),
+                            machine=machine or FakeMachine(), agents=agents or FakeAgents(),
+                            skills=skills or FakeSkills(), scripts=scripts or FakeScripts(),
+                            catalogs=catalogs or FakeCatalogs())
+        except SystemExit as usage:
+            code = usage.code if isinstance(usage.code, int) else 1
+    return code, out.getvalue(), err.getvalue()
+
+
+class SayingAListingAsARecord(unittest.TestCase):
+    """`--json` — the same answer, for something reading it rather than for a person.
+
+    What these are really about is that there is **one** answer. The columns and the record
+    come out of the same call, so a case here that finds them disagreeing has found a
+    second projection of the data, which is the thing this was built to make impossible.
+    """
+
+    def test_a_listing_asked_for_as_json_is_one_document_that_parses(self):
+        gateways = FakeGateways(standing=[
+            FakeGateways.Standing("agent-one", running=True, pid=42, version="0.1.1")])
+        code, out, _ = apart(["agents", "--json"], gateways,
+                             agents=FakeAgents(made=["agent-one"]))
+        self.assertEqual(0, code)
+        # Exactly one document, with nothing in front of it and nothing after. Asserted on
+        # the whole stream rather than by finding a `{` in it, because the failure this
+        # guards against is a line of prose printed beside the record — and a parser given
+        # `no agents\n{...}` fails in a way that names neither.
+        said = json.loads(out)
+        self.assertEqual(__version__, said["rundesk"])
+        self.assertEqual("agents", said["command"])
+
+    def test_what_the_columns_show_and_what_json_says_are_the_same_rows(self):
+        gateways = FakeGateways(standing=[
+            FakeGateways.Standing("agent-one", running=True, pid=42, version="0.1.1"),
+            FakeGateways.Standing("agent-two", running=False),
+        ])
+        made = ["agent-one", "agent-two"]
+        _, columns, _ = apart(["agents"], gateways, agents=FakeAgents(made=made))
+        _, record, _ = apart(["agents", "--json"], gateways, agents=FakeAgents(made=made))
+        listed = json.loads(record)["shown"][0]
+        # Every cell the record holds is a cell the table printed, and the header the table
+        # printed is the key the record is read by. Two projections of one set of rows is
+        # what this file exists to prevent.
+        self.assertEqual(["agent", "state", "pid", "uptime", "launchd_job", "version",
+                          "processes", "turns", "unfinished"], listed["columns"])
+        self.assertEqual(["agent-one", "agent-two"], [row["agent"] for row in listed["rows"]])
+        for row in listed["rows"]:
+            for cell in row.values():
+                self.assertIn(cell, columns)
+        self.assertEqual("RUNNING", listed["rows"][0]["state"])
+        self.assertEqual("42", listed["rows"][0]["pid"])
+        self.assertEqual("STOPPED", listed["rows"][1]["state"])
+
+    def test_json_is_not_corrupted_by_what_a_command_says_beside_its_table(self):
+        # A gateway running under a name with no agent behind it. The command says so
+        # under the table, in a sentence written for a person — and that sentence on
+        # stdout is a document nothing can parse.
+        gateways = FakeGateways(standing=[
+            FakeGateways.Standing("orphan", running=True, pid=7, version="0.1.1")])
+        _, out, _ = apart(["agents", "--json"], gateways, agents=FakeAgents(made=[]))
+        json.loads(out)
+        self.assertNotIn("no agent yet", out)
+        self.assertNotIn("give one an agent", out)
+
+    def test_an_install_with_no_agents_says_it_has_none_rather_than_saying_nothing(self):
+        # The reason the empty guard moved below the table. Nothing to list is an answer,
+        # and something told nothing at all cannot tell it from a command that never ran.
+        _, out, _ = apart(["agents", "--json"], agents=FakeAgents(made=[]))
+        listed = json.loads(out)["shown"]
+        self.assertEqual(1, len(listed))
+        self.assertEqual("agents", listed[0]["called"])
+        self.assertEqual([], listed[0]["rows"])
+        self.assertIn("agent", listed[0]["columns"])
+
+    def test_an_empty_listing_still_prints_nothing_at_all_to_a_person(self):
+        # The other half of the change above: what a person sees is what they always saw.
+        _, out, _ = apart(["agents"], agents=FakeAgents(made=[]))
+        self.assertEqual("no agents\n        make one:  rundesk add <agent>\n", out)
+
+    def test_one_agent_asked_for_as_json_names_every_place_it_resolves(self):
+        _, out, _ = apart(["agents", "agent-one", "--json"],
+                          agents=FakeAgents(made=["agent-one"]))
+        listed = {it["called"]: it for it in json.loads(out)["shown"]}
+        self.assertEqual("agent-one", listed["paths"]["about"])
+        where = {row["what"]: row["where"] for row in listed["paths"]["rows"]}
+        # Whatever the agent module resolves, said whole. Named rather than counted, and
+        # not exhaustively: what the set *is* belongs to `test_agent.py`, and this case is
+        # only that the record carries it rather than losing it.
+        for named in ("agent", "home", "logs", "run", "workspace"):
+            self.assertIn(named, where)
+        # Nothing was interrupted, and that is still a listing rather than a silence.
+        self.assertEqual([], listed["unfinished"]["rows"])
+
+    def test_the_skills_on_this_machine_are_sayable_as_a_record(self):
+        _, out, _ = apart(["skills", "--json"])
+        listed = json.loads(out)["shown"][0]
+        self.assertEqual("skills", listed["called"])
+        self.assertEqual(["skill", "from", "agents"], listed["columns"])
+
+    def test_how_rundesk_itself_stands_is_sayable_as_a_record(self):
+        _, out, _ = apart(["status", "--json"])
+        listed = json.loads(out)["shown"][0]
+        self.assertEqual("status", listed["called"])
+        said = {row["what"]: row["is"] for row in listed["rows"]}
+        self.assertEqual(__version__, said["version"])
+
+    def test_asking_for_json_leaves_what_went_wrong_on_the_error_stream(self):
+        code, out, err = apart(["agents", "no-such-agent", "--json"],
+                               agents=FakeAgents(made=[]))
+        self.assertEqual(1, code)
+        self.assertIn("NO SUCH AGENT", err)
+        # Still one document, and still nothing of the complaint in it. What failed is
+        # what the caller needs, and it needs it where a failure is read.
+        json.loads(out)
+        self.assertNotIn("NO SUCH AGENT", out)
+
+    def test_a_command_that_failed_ends_the_way_it_would_have_without_json(self):
+        # How it was asked changes what is shown, never what happened.
+        plain, _, _ = apart(["agents", "no-such-agent"], agents=FakeAgents(made=[]))
+        record, _, _ = apart(["agents", "no-such-agent", "--json"], agents=FakeAgents(made=[]))
+        self.assertEqual(plain, record)
+
+    def test_a_verb_that_lists_nothing_is_never_offered_the_flag(self):
+        # A flag accepted where there is nothing to list is one reporting a success it
+        # did not earn. Read off the parser, so a verb that grows the flag without
+        # growing a listing is caught rather than merely disapproved of.
+        lists = {"agents", "status", "skills"}
+        for verb, parser in sorted(_offered(cli.build_parser()).items()):
+            offers = any("--json" in it.option_strings for it in parser._actions)
+            with self.subTest(verb=verb):
+                self.assertEqual(verb in lists, offers,
+                                 f"'{verb}' offers --json: {offers}")
+
+
 class WhatAGatewayRunsOnItsOwn(unittest.TestCase):
     """A schedule is a row an agent keeps, so these cases need real records rather than a
     stand-in for them: what the command asks of them is exactly `store.py`'s surface, and one

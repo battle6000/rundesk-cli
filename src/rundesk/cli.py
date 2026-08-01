@@ -17,14 +17,17 @@ import argparse
 import asyncio
 import contextlib
 import getpass
+import io
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -259,6 +262,24 @@ def _brain(parser: argparse.ArgumentParser, whose: str) -> None:
                         help="anything that brain takes, carried to it unread; repeatable")
 
 
+def _machine_readable(parser: argparse.ArgumentParser) -> None:
+    """Say the same answer as whole records rather than as columns, for what lists something.
+
+    Registered on the verbs that list and on no others. A flag accepted where there is
+    nothing to list is a flag reporting a success it did not earn — `ask --json` would
+    stream a turn to the terminal and then print an empty document.
+
+    On the verb rather than in front of it, which is not a style choice. argparse takes a
+    top-level option *before* the sub-command, so a global one would refuse
+    `rundesk agents --json` — the form anybody would type — and accept only
+    `rundesk --json agents`. It would also be invisible in `CLI.md`, whose generator walks
+    the verbs, and a surface that is not in the reference is one nothing was told about
+    (R-CMD-2).
+    """
+    parser.add_argument("--json", action="store_true",
+                        help="say it as one record rather than as columns")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rundesk",
@@ -409,8 +430,10 @@ def build_parser() -> argparse.ArgumentParser:
     listed_agents = sub.add_parser("agents", help="every agent this install has, and what each is doing")
     listed_agents.add_argument("name", nargs="?", metavar="<agent>",
                                help="one agent — what it is, and where it keeps things")
+    # One parser answers both forms, so naming an agent is machine-readable too.
+    _machine_readable(listed_agents)
 
-    sub.add_parser("status", help="how rundesk itself is on this machine")
+    _machine_readable(sub.add_parser("status", help="how rundesk itself is on this machine"))
 
     sub.add_parser("config", help="how this install is configured, and where each value came from")
 
@@ -609,6 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help=argparse.SUPPRESS)   # the same, on the way out
     known.add_argument("--where", action="store_true",
                        help="print the directory they are kept in, and nothing else")
+    _machine_readable(known)
     doing = known.add_subparsers(dest="act", metavar="<action>")
     given = doing.add_parser("grant", help="give an agent one of the skills in the library")
     given.add_argument("name", metavar="<agent>", help="who is being given it")
@@ -1442,14 +1466,110 @@ def cmd_not_available(name: str, act: str | None = None) -> int:
     return NOT_AVAILABLE
 
 
-def _as_table(head: tuple, rows: list) -> None:
-    """Columns wide enough for what is in them. Written once, so the two things that
-    list something in columns cannot come to disagree about how."""
+@dataclass(frozen=True)
+class Shown:
+    """One thing a command showed: what it is, whose it is, and what was in it."""
+    kind: str                       # "table" or "text"
+    called: str | None = None       # what this listing is, for something reading it
+    about: str | None = None        # whose, when a command shows the same kind twice
+    columns: tuple = ()
+    rows: tuple = ()
+    text: str = ""
+
+
+#: Where a listing goes while something is reading it rather than a person. `None` is the
+#: ordinary case: every command prints its own columns and nothing here is involved.
+_COLLECTING: list | None = None
+
+
+@contextlib.contextmanager
+def _collecting():
+    """Take what a command lists instead of printing it, and put aside what it says beside it.
+
+    Everything a command prints outside its own tables is prose written for a person — a
+    hint when there is nothing to list, a heading over one agent's detail, a footer naming
+    what has no agent yet. One line of it on stdout is a document nothing can parse. So
+    stdout is redirected for the whole of the command and thrown away, and the record is
+    written afterwards to the real one.
+
+    **stderr is untouched**, because what went wrong is exactly what a caller still needs,
+    and is what the local console shows an owner verbatim.
+    """
+    global _COLLECTING
+    was, _COLLECTING = _COLLECTING, []
+    mine = _COLLECTING
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            yield mine
+    finally:
+        _COLLECTING = was
+
+
+def _as_table(head: tuple, rows: list, called: str | None = None,
+              about: str | None = None) -> None:
+    """Columns wide enough for what is in them — or the same rows handed to whatever is
+    reading, rather than printed.
+
+    Written once, so the two things that list something in columns cannot come to disagree
+    about how. That is also why it is where a listing becomes a record: a second projection
+    of the same rows would be a second thing to keep in step, and the two would disagree
+    the first time a column moved.
+    """
+    if _COLLECTING is not None:
+        # Recorded **above** the empty guard. No rows is an answer, and something told
+        # nothing at all cannot tell it apart from a command that listed nothing.
+        _COLLECTING.append(Shown("table", called, about, tuple(head),
+                                 tuple(tuple(row) for row in rows)))
+        return
     if not rows:
         return
     widths = [max(len(row[i]) for row in [head] + rows) for i in range(len(head))]
     for row in [head] + rows:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+
+
+def _as_text(called: str, text: str, about: str | None = None) -> None:
+    """What a command shows whole rather than in columns — a page, a log. Said once, so a
+    command that grows one is machine-readable for the same reason a table is."""
+    if _COLLECTING is not None:
+        _COLLECTING.append(Shown("text", called, about, text=text))
+        return
+    print(text, end="" if text.endswith("\n") else "\n")
+
+
+def _slug(cell: str) -> str:
+    """A column header as a key. Derived from the header rather than written beside it, so
+    a renamed column renames its key and the two cannot come apart."""
+    return re.sub(r"[^a-z0-9]+", "_", cell.lower()).strip("_")
+
+
+def _as_json(command: str, shown: list) -> str:
+    """One record for whatever the command showed, in the order it showed it.
+
+    A **list** rather than a mapping keyed by name: a command may show the same kind of
+    thing several times — `agents` shows what each busy agent is doing — and a mapping
+    would keep only the last.
+
+    **The cells are what the columns hold, unchanged.** Giving them types here would mean a
+    second projection of every command's data, which is the one list this file refuses to
+    keep twice, and the two would disagree the first time a column moved. A dash means in
+    the record exactly what it means in the table.
+
+    There is no field saying whether it worked. The exit code is that answer, and a second
+    copy of it is a second thing that can be wrong.
+    """
+    return json.dumps({
+        "rundesk": __version__,
+        "command": command,
+        "shown": [
+            {"kind": it.kind, "called": it.called, "about": it.about,
+             **({"columns": [_slug(cell) for cell in it.columns],
+                 "rows": [dict(zip((_slug(cell) for cell in it.columns), row))
+                          for row in it.rows]}
+                if it.kind == "table" else {"text": it.text})}
+            for it in shown
+        ],
+    })
 
 
 def cmd_serve(args: argparse.Namespace, gateways, agents) -> int:
@@ -2594,10 +2714,6 @@ def cmd_skills(args: argparse.Namespace, agents, skills, gateways, catalogs) -> 
         return 0
 
     held = skills.library()
-    if not held:
-        print("no skills")
-        print(f"        write one:  {skills.home()}/<name>/SKILL.md")
-        return 0
     ships = set(skills.shipped())
     # Asked of every agent rather than kept anywhere, because "who has this" is otherwise
     # a question only a reverse scan can answer and a stored answer would go stale the
@@ -2611,7 +2727,13 @@ def cmd_skills(args: argparse.Namespace, agents, skills, gateways, catalogs) -> 
     rows = [(name, "rundesk" if name in ships else (catalogs.whose(held[name]) or "custom"),
              ", ".join(sorted(who for who, mine in whose.items() if name in mine)) or "-")
             for name in sorted(held)]
-    _as_table(("SKILL", "FROM", "AGENTS"), rows)
+    _as_table(("SKILL", "FROM", "AGENTS"), rows, called="skills")
+    # Below the table on purpose. Printing nothing costs a person nothing — the table with
+    # no rows prints nothing either — and it leaves "there are none" a listing something
+    # reading this can find, rather than an answer it never receives at all.
+    if not held:
+        print("no skills")
+        print(f"        write one:  {skills.home()}/<name>/SKILL.md")
     return 0
 
 
@@ -2925,10 +3047,6 @@ def cmd_agents(args: argparse.Namespace, gateways, machine, agents) -> int:
     described = set(machine.described()) if has_supervisor else set()
     found = {name: _standing(name, gateways, agents)
              for name in _every_name(gateways, machine, agents)}
-    if not found:
-        print("no agents")
-        print("        make one:  rundesk add <agent>")
-        return 0
     rows, orphaned = [], []
     for name in sorted(found):
         it = found[name]
@@ -2970,7 +3088,13 @@ def cmd_agents(args: argparse.Namespace, gateways, machine, agents) -> int:
         ))
     _as_table(("AGENT", "STATE", "PID", "UPTIME", "LAUNCHD JOB", "VERSION",
                "PROCESSES", "TURNS", "UNFINISHED"),
-              rows)
+              rows, called="agents")
+    # Below the table, for the reason given in `cmd_skills`: an install with nothing in it
+    # still answers, rather than being the one case that says nothing at all.
+    if not found:
+        print("no agents")
+        print("        make one:  rundesk add <agent>")
+        return 0
     for name in sorted(found):
         run_home = agents.resolved(name).run
         it = found[name]
@@ -2992,7 +3116,8 @@ def cmd_agents(args: argparse.Namespace, gateways, machine, agents) -> int:
             str(row["pid"]),
             _how_long(row.get("since")),
         ) for row in turning)
-        _as_table(("KIND", "SOURCE", "CONVERSATION", "PID", "ELAPSED"), details)
+        _as_table(("KIND", "SOURCE", "CONVERSATION", "PID", "ELAPSED"), details,
+                  called="working", about=name)
     if orphaned:
         print()
         print(f"no agent yet — running since before there were any: {', '.join(orphaned)}")
@@ -3020,7 +3145,8 @@ def _one_agent(name: str, gateways, machine, agents) -> int:
     print(f"{name}: " + (("WEDGED" if it.stale else f"RUNNING (pid {it.pid})")
                          if it.running else "STOPPED"))
     _as_table(("WHAT", "WHERE"),
-              [(what, str(at)) for what, at in sorted(where_it_is.items())])
+              [(what, str(at)) for what, at in sorted(where_it_is.items())],
+              called="paths", about=name)
     # What never finished, with the time and the reason for each (R-GW-39). Told apart by
     # whether rundesk could show the work was definitely gone: one of them is over, and
     # the other may still be running with nobody owning it, which is a different problem
@@ -3028,11 +3154,14 @@ def _one_agent(name: str, gateways, machine, agents) -> int:
     unfinished = gateways.what_was_interrupted(name, agents.resolved(name).logs)
     if unfinished:
         print()
-        _as_table(("UNFINISHED", "AT", "ENDED", "WHY"), [
-            (work, str(how.get("at", "-")),
-             "yes" if how.get("ended") else "unproven", str(how.get("why", "-")))
-            for work, how in sorted(unfinished.items())
-        ])
+    # Unconditional, and the blank line above is not: a table with no rows prints nothing,
+    # so a person sees exactly what they saw before, and "nothing was interrupted" stays a
+    # listing rather than a silence something reading this would have to guess at.
+    _as_table(("UNFINISHED", "AT", "ENDED", "WHY"), [
+        (work, str(how.get("at", "-")),
+         "yes" if how.get("ended") else "unproven", str(how.get("why", "-")))
+        for work, how in sorted(unfinished.items())
+    ], called="unfinished", about=name)
     return 0
 
 
@@ -3071,7 +3200,7 @@ def cmd_status(_args: argparse.Namespace, gateways, machine, agents) -> int:
         # about any agent, and the answer somebody needs is not how many copies there are
         # but whether anything is still making them.
         ("backups", _how_backups_stand(machine)),
-    ])
+    ], called="status")
     return 1 if unfit else 0
 
 
@@ -4478,6 +4607,22 @@ def main(argv: list[str], gateways=None, machine=None, agents=None, skills=None,
     except _supervisor.NotAPrefix as why:
         print(f"RUNDESK_JOB_PREFIX: INVALID — {why}", file=sys.stderr)
         return 1
+    # Asked for as a record, so what the command lists is taken rather than printed and
+    # written once, afterwards, as one document. The exit code is the command's own: how
+    # it was asked changes what is shown and never what happened.
+    if getattr(args, "json", False):
+        with _collecting() as shown:
+            code = _dispatch(args, gateways, machine, agents, skills, scripts, catalogs)
+        print(_as_json(args.command, shown))
+        return code
+    return _dispatch(args, gateways, machine, agents, skills, scripts, catalogs)
+
+
+def _dispatch(args: argparse.Namespace, gateways, machine, agents, skills,
+              scripts, catalogs) -> int:
+    """Which command answers this. Separated from `main` so that a verb behaves the same
+    whether a person or something reading records asked for it — there is one dispatch,
+    and the difference is only what is done with what it showed."""
     if args.command in PLANNED:
         return cmd_not_available(args.command, getattr(args, "act", None))
     if args.command == "version":

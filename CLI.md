@@ -15,8 +15,8 @@ file and the command disagree. *Why* the surface is shaped this way is
 rundesk add [--provider <provider>] [--model <model>] [--set <key=value>] [--instructions <text>] <agent>                                                                                                               make an agent, and the gateway that runs it
 rundesk configure [--provider <provider>] [--model <model>] [--set <key=value>] [--instructions <text>] <agent>                                                                                                         change an existing agent's durable defaults
 rundesk remove <agent>                                                                                                                                                                                                  take an agent away for good
-rundesk agents                                                                                                                                                                                                          every agent this install has, and what each is doing
-rundesk agents <agent>                                                                                                                                                                                                  what one agent is, and where it keeps things
+rundesk agents [--json]                                                                                                                                                                                                 every agent this install has, and what each is doing
+rundesk agents [--json] <agent>                                                                                                                                                                                         what one agent is, and where it keeps things
 rundesk doctor                                                                                                                                                                                                          what stands between every agent and a working turn
 rundesk doctor <agent>                                                                                                                                                                                                  what stands between one agent and a working turn
 
@@ -45,7 +45,7 @@ rundesk usage                                                                   
 rundesk usage <agent>                                                                                                                                                                                                   what one agent has cost
 
 # rundesk itself
-rundesk status                                                                                                                                                                                                          how rundesk itself is on this machine
+rundesk status [--json]                                                                                                                                                                                                 how rundesk itself is on this machine
 rundesk version [--check]                                                                                                                                                                                               what is installed, and whether that is current
 rundesk update [--check] [--status]                                                                                                                                                                                     move to the newest published release
 rundesk backups add                                                                                                                                                                                                     take a backup now
@@ -142,6 +142,7 @@ rundesk schedules ava off nightly
 --here                          run it in this terminal instead of handing it to the machine
 --in <where>                    which place on that channel to say it in, in that surface's own words — for Discord: a room name or id, or on a DM channel the person's user id (the same id as --allow) or the DM channel id. Left out, it follows the conversation
 --instructions <text>           what every turn for this agent is told before it reads a prompt, where neither the schedule nor the surface said — empty takes it off
+--json                          say it as one record rather than as columns
 --kind <kind>                   which kind of surface — one that ships, or the path of a program that speaks yours
 --model <model>                 which model, in that brain's own words
 --most <n>                      how many to show, newest first (default: 20)
