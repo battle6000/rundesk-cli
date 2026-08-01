@@ -1,16 +1,31 @@
 # The install's own dependencies, put there by install.sh
 .venv/
 
-# Python
+# Python. **Anchored to the root on purpose.** An unanchored `dist/` matches at every
+# depth, and it silently excluded `src/ui/dist` — which is the built console, is committed,
+# and is the only thing an installed rundesk has to serve. A `!` negation could not have
+# rescued it either: git never descends into an excluded directory, so nothing under one
+# can be re-included. The release archive is `git archive`, so untracked is unshipped, and
+# the console would have worked on every developer's machine and on nobody else's.
 __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
-build/
-dist/
+/build/
+/dist/
 
-# Local environment / credentials — never commit
+# The console's workspace: a contributor's tool, never part of an install. Its **build
+# output** (`src/ui/dist`) is committed on purpose — that is what lets a user's install
+# have no Node, no package manager and no build step. Only the machinery is ignored.
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/*.tsbuildinfo
+
+# Local environment / credentials — never commit. `.env` is an exact match and does not
+# cover `.env.local`, which is where a workspace keeps a developer's own overrides.
 .env
+ui/.env*.local
 
 # OS / editor
 .DS_Store

@@ -1,0 +1,10 @@
+# The built console, committed so that an install needs no Node and no build step.
+#
+# `-text` because it is an artifact and not somebody's source: a contributor whose git is
+# set to translate line endings would otherwise rewrite these bytes on checkout, and the
+# check that proves the committed bundle is what `ui/` builds would fail on a machine
+# rather than on a mistake.
+#
+# `-diff` and `linguist-generated` because it is minified: a review that scrolls past it
+# is a review that stopped reading, and the thing worth reviewing is `ui/`.
+src/ui/dist/** -text -diff linguist-generated=true
