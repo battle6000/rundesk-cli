@@ -46,6 +46,7 @@ rundesk usage <agent>                                                           
 
 # rundesk itself
 rundesk status [--json]                                                                                                                                                                                                 how rundesk itself is on this machine
+rundesk ui [--port <port>] [--no-open]                                                                                                                                                                                  open the local console in a browser
 rundesk version [--check]                                                                                                                                                                                               what is installed, and whether that is current
 rundesk update [--check] [--status]                                                                                                                                                                                     move to the newest published release
 rundesk backups add                                                                                                                                                                                                     take a backup now
@@ -146,6 +147,8 @@ rundesk schedules ava off nightly
 --kind <kind>                   which kind of surface — one that ships, or the path of a program that speaks yours
 --model <model>                 which model, in that brain's own words
 --most <n>                      how many to show, newest first (default: 20)
+--no-open                       print the address rather than opening a browser
+--port <port>                   which port to listen on — one the machine picks when left out
 --provider <provider>           which brain answers for it when a turn does not say
 --purge                         also take every agent's home, log and history
 --read-only                     let this turn look at the machine without changing it

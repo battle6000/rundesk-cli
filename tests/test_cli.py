@@ -118,7 +118,7 @@ from rundesk import gateway as real_gateway  # noqa: E402
 
 
 def run(argv: list[str], published: str | None = None,
-        written: pathlib.Path | None = None) -> tuple[int, str, str]:
+        written: pathlib.Path | None = None, console=None) -> tuple[int, str, str]:
     """One CLI invocation, with everything it printed.
 
     Offline: whatever the command would ask the forge, it is told here instead. A
@@ -139,7 +139,8 @@ def run(argv: list[str], published: str | None = None,
             try:
                 code = cli.main(argv, gateways=FakeGateways(written=written),
                                 machine=FakeMachine(), agents=FakeAgents(),
-                                skills=FakeSkills(), scripts=FakeScripts())
+                                skills=FakeSkills(), scripts=FakeScripts(),
+                                console=console or FakeConsole())
             except SystemExit as usage:
                 # What a shell sees, which is the subject of several cases here: argparse
                 # refuses a usage error by exiting rather than returning, and a test that
@@ -479,7 +480,7 @@ class BuiltCommandTests(unittest.TestCase):
         built = {"version", "update", "uninstall", "add", "configure", "ask", "doctor", "agents",
                  "serve", "start", "stop", "remove", "restart", "status", "logs", "schedules",
                  "channels", "runs", "usage", "search", "messages", "skills", "scripts",
-                 "backups", "config"}
+                 "backups", "config", "ui"}
         self.assertEqual(built & set(cli.PLANNED), set())
         self.assertEqual(set(verbs()), built | set(cli.PLANNED))
 
@@ -885,6 +886,60 @@ class FakeScripts:
         return dict(self._held)
 
 
+class FakeConsole:
+    """The local console, as far as the command line is concerned — and never the real one.
+
+    **This exists because the surface cases below walk every verb and invoke it.** `ui`
+    binds a port, opens a browser and answers until it is stopped, so against the real
+    module the case proving each verb is wired would take the developer's browser and then
+    never finish. Same class of hazard as `_never_the_real_installer` above, and the same
+    answer: replaced for the whole file, not in whichever cases happen to think of it.
+
+    Nothing here listens. `bound` hands back a stand-in for a server, and `serve` returns
+    at once — what a real one does is `tests/test_ui.py`'s, and this file's business is
+    only that the verb reaches it and reports what it was told.
+    """
+
+    ADDRESS = "127.0.0.1"
+    DIST = pathlib.Path("/nowhere/ui/dist")
+
+    class Server:
+        server_address = ("127.0.0.1", 54321)
+
+    def __init__(self, is_built=True, refuses=None):
+        self._built = is_built
+        #: What binding raises, for the cases about a port that cannot be had.
+        self._refuses = refuses
+        #: What it was asked to do, in order — so a case can prove a browser was never
+        #: opened without one having been.
+        self.bound_on: list = []
+        self.served = 0
+        self.opened: list = []
+
+    def built(self):
+        return self._built
+
+    def minted(self):
+        return "a-key-for-one-window"
+
+    def bound(self, token, port=0):
+        if self._refuses is not None:
+            raise self._refuses
+        self.bound_on.append(port)
+        return self.Server()
+
+    def address_of(self, server, token):
+        host, at = server.server_address
+        return f"http://{host}:{at}/#t={token}"
+
+    def serve(self, server):
+        self.served += 1
+
+    def open_browser(self, where):
+        self.opened.append(where)
+        return True
+
+
 class FakeAgents:
     """The agent module, as far as the command line is concerned.
 
@@ -1262,7 +1317,7 @@ class FakeMachine:
 
 
 def drive(argv, gateways=None, machine=None, agents=None, skills=None, scripts=None,
-          catalogs=None):
+          catalogs=None, console=None):
     """Run the command line and hand back what it printed and what it returned."""
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -1270,7 +1325,8 @@ def drive(argv, gateways=None, machine=None, agents=None, skills=None, scripts=N
             code = cli.main(argv, gateways=gateways or FakeGateways(),
                             machine=machine or FakeMachine(), agents=agents or FakeAgents(),
                             skills=skills or FakeSkills(), scripts=scripts or FakeScripts(),
-                            catalogs=catalogs or FakeCatalogs())
+                            catalogs=catalogs or FakeCatalogs(),
+                            console=console or FakeConsole())
         except SystemExit as usage:
             # What a shell sees. Argparse refuses by exiting rather than returning, and a
             # case proving something is refused by the grammar could not otherwise say
@@ -2736,7 +2792,7 @@ class WhatEachAgentIsDoing(unittest.TestCase):
 
 
 def apart(argv, gateways=None, machine=None, agents=None, skills=None, scripts=None,
-          catalogs=None):
+          catalogs=None, console=None):
     """The same as `drive`, with the two streams kept apart.
 
     `drive` joins them, which is right for every case that only asks what was said. These
@@ -2749,7 +2805,8 @@ def apart(argv, gateways=None, machine=None, agents=None, skills=None, scripts=N
             code = cli.main(argv, gateways=gateways or FakeGateways(),
                             machine=machine or FakeMachine(), agents=agents or FakeAgents(),
                             skills=skills or FakeSkills(), scripts=scripts or FakeScripts(),
-                            catalogs=catalogs or FakeCatalogs())
+                            catalogs=catalogs or FakeCatalogs(),
+                            console=console or FakeConsole())
         except SystemExit as usage:
             code = usage.code if isinstance(usage.code, int) else 1
     return code, out.getvalue(), err.getvalue()
@@ -2878,6 +2935,85 @@ class SayingAListingAsARecord(unittest.TestCase):
             with self.subTest(verb=verb):
                 self.assertEqual(verb in lists, offers,
                                  f"'{verb}' offers --json: {offers}")
+
+
+class OpeningTheLocalConsole(unittest.TestCase):
+    """`rundesk ui` — the verb. What the console itself does is `tests/test_ui.py`'s."""
+
+    def test_the_console_verb_says_where_it_is_and_serves_until_it_is_stopped(self):
+        console = FakeConsole()
+        code, out, _ = apart(["ui", "--no-open"], console=console)
+        self.assertEqual(0, code)
+        self.assertIn("http://127.0.0.1:54321/#t=a-key-for-one-window", out)
+        self.assertEqual(1, console.served)
+
+    def test_the_console_says_it_is_this_machines_and_how_to_stop_it(self):
+        # Somebody who has just opened a port deserves to be told both.
+        _, out, _ = apart(["ui", "--no-open"], console=FakeConsole())
+        self.assertIn("this machine only", out)
+        self.assertIn("ctrl-c", out)
+
+    def test_the_address_is_printed_before_a_browser_is_ever_opened(self):
+        # On a machine with no browser, over SSH, or where opening one fails, the address
+        # on the terminal is the whole of what an owner has.
+        console = FakeConsole()
+        _, out, _ = apart(["ui"], console=console)
+        self.assertIn("http://127.0.0.1:54321", out)
+        self.assertEqual([f"http://127.0.0.1:54321/#t=a-key-for-one-window"],
+                         console.opened)
+
+    def test_asking_for_the_address_alone_opens_nothing(self):
+        console = FakeConsole()
+        apart(["ui", "--no-open"], console=console)
+        self.assertEqual([], console.opened)
+
+    def test_a_rundesk_with_no_console_built_says_so_and_starts_nothing(self):
+        """A blank tab is the product claiming a success it did not earn."""
+        console = FakeConsole(is_built=False)
+        code, out, err = apart(["ui"], console=console)
+        self.assertEqual(1, code)
+        self.assertIn("NOT BUILT", err)
+        # Where it looked, and what builds it. Being told only that something is missing
+        # leaves a reader exactly where they started.
+        self.assertIn(str(console.DIST), err)
+        self.assertIn("npm run build", err)
+        self.assertEqual([], console.bound_on)
+        self.assertEqual([], console.opened)
+        self.assertEqual("", out)
+
+    def test_a_port_that_cannot_be_had_fails_rather_than_moving_to_another(self):
+        # An address that is not the one somebody asked for is a lie they will bookmark.
+        console = FakeConsole(refuses=OSError("Address already in use"))
+        code, out, err = apart(["ui", "--port", "7357"], console=console)
+        self.assertEqual(1, code)
+        self.assertIn("7357", err)
+        self.assertIn("Address already in use", err)
+        self.assertEqual("", out)
+
+    def test_the_console_is_never_handed_to_the_machine_to_keep_running(self):
+        # It runs where it was typed and stops with the person who typed it. A job would
+        # be a second gateway on the machine, which is the thing this is not.
+        machine = FakeMachine()
+        apart(["ui", "--no-open"], machine=machine, console=FakeConsole())
+        self.assertEqual([], getattr(machine, "installed", []))
+
+    def test_no_case_in_this_file_can_reach_a_real_socket_or_a_browser(self):
+        """The guard, and the reason `console` is a collaborator at all.
+
+        The surface cases walk every verb and invoke it. Against the real module that
+        binds a port, takes the developer's browser, and answers until it is stopped —
+        so a case here would never end. Both drivers therefore pass a stand-in always,
+        never only where somebody remembered to.
+        """
+        for driver in (run, drive, apart):
+            with self.subTest(driver=driver.__name__):
+                signature = driver.__code__.co_varnames[:driver.__code__.co_argcount]
+                self.assertIn("console", signature,
+                              f"{driver.__name__} cannot be given a stand-in console")
+        # And the real one is genuinely never reached: it would have had to listen.
+        self.assertIs(cli._ui, sys.modules["rundesk.ui"])
+        code, _, _ = apart(["ui", "--no-open"], console=FakeConsole())
+        self.assertEqual(0, code)
 
 
 class WhatAGatewayRunsOnItsOwn(unittest.TestCase):

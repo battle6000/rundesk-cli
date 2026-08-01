@@ -51,6 +51,7 @@ from rundesk import skill  # noqa: E402
 from rundesk import store  # noqa: E402
 from rundesk import supervisor as _supervisor  # noqa: E402
 from rundesk import turn  # noqa: E402
+from rundesk import ui as _ui  # noqa: E402
 from rundesk import updater  # noqa: E402
 from rundesk import update_request  # noqa: E402
 
@@ -434,6 +435,15 @@ def build_parser() -> argparse.ArgumentParser:
     _machine_readable(listed_agents)
 
     _machine_readable(sub.add_parser("status", help="how rundesk itself is on this machine"))
+
+    # No noun, for the same reason `status` has none: there is one console and it is this
+    # install's. It runs here and stops when the person who started it does — nothing is
+    # written, nothing is handed to the machine, and there is no second thing to stop.
+    console = sub.add_parser("ui", help="open the local console in a browser")
+    console.add_argument("--port", type=int, default=0, metavar="<port>",
+                         help="which port to listen on — one the machine picks when left out")
+    console.add_argument("--no-open", action="store_true", dest="no_open",
+                         help="print the address rather than opening a browser")
 
     sub.add_parser("config", help="how this install is configured, and where each value came from")
 
@@ -3204,6 +3214,48 @@ def cmd_status(_args: argparse.Namespace, gateways, machine, agents) -> int:
     return 1 if unfit else 0
 
 
+def cmd_ui(args: argparse.Namespace, console) -> int:
+    """Open the local console: a window onto this command, on this machine only.
+
+    In the foreground, and nothing the machine keeps up. There is no job to write, no
+    second thing to stop, and nothing running once the person who started it has gone —
+    which is the difference between an optional interface and another gateway.
+
+    Every page on it is the output of a command run here, so it is not a second way into
+    the product: it is this one, looked at.
+    """
+    if not console.built():
+        # Before anything is bound and before a browser is opened. A blank tab is the
+        # product claiming a success it did not earn, and the two things somebody needs
+        # are where it looked and what builds it.
+        print("ui: NOT BUILT — this rundesk has no console to serve", file=sys.stderr)
+        print(f"        looked in:  {console.DIST}", file=sys.stderr)
+        print("        build it:   cd ui && npm ci && npm run build", file=sys.stderr)
+        return 1
+    token = console.minted()
+    try:
+        server = console.bound(token=token, port=args.port)
+    except OSError as why:
+        # A port that was asked for and is taken fails here rather than quietly moving to
+        # another one. An address that is not the one somebody asked for is a lie, and it
+        # is a lie they will bookmark.
+        print(f"ui: FAILED — could not listen on {console.ADDRESS}:{args.port} — {why}",
+              file=sys.stderr)
+        return 1
+    where = console.address_of(server, token)
+    print(f"the console is at {where}")
+    print("        this machine only, and it stops when you do  (ctrl-c)")
+    if not args.no_open:
+        console.open_browser(where)
+    try:
+        console.serve(server)
+    except KeyboardInterrupt:
+        # Asked to stop, and stopped. The newline is so the shell prompt does not land
+        # beside the `^C` the terminal printed.
+        print()
+    return 0
+
+
 def _answered_within(patience: float, work, called: str) -> tuple:
     """Do something that may block inside the operating system, and give up on it.
 
@@ -4566,12 +4618,18 @@ def _handed_on(argv: list[str], carries: set) -> tuple[list[str], list[str]]:
 
 
 def main(argv: list[str], gateways=None, machine=None, agents=None, skills=None,
-         scripts=None, catalogs=None) -> int:
+         scripts=None, catalogs=None, console=None) -> int:
     """The command surface.
 
     What the commands act on is passed in rather than imported here, so this file knows
     the verbs and nothing about locks, records or process groups — and so every one of
     them is exercised without a gateway or a supervisor anywhere near it.
+
+    `console` is on that list for a reason worth naming: the suite walks *every* verb off
+    this parser and invokes it, and `ui` listens until it is stopped. Without somewhere to
+    put a stand-in, the case proving each verb is wired would bind a port and open the
+    developer's browser and then never end — which is exactly what `_remove_this_install`
+    is replaced for, one verb along.
     """
     gateways = gateways if gateways is not None else _gateway
     machine = machine if machine is not None else _supervisor
@@ -4579,6 +4637,7 @@ def main(argv: list[str], gateways=None, machine=None, agents=None, skills=None,
     skills = skills if skills is not None else skill
     scripts = scripts if scripts is not None else script
     catalogs = catalogs if catalogs is not None else catalog
+    console = console if console is not None else _ui
     parser = build_parser()
     argv, handed_on = _handed_on(argv, _carries_a_tail(parser))
     args = parser.parse_args(argv)
@@ -4612,14 +4671,15 @@ def main(argv: list[str], gateways=None, machine=None, agents=None, skills=None,
     # it was asked changes what is shown and never what happened.
     if getattr(args, "json", False):
         with _collecting() as shown:
-            code = _dispatch(args, gateways, machine, agents, skills, scripts, catalogs)
+            code = _dispatch(args, gateways, machine, agents, skills, scripts,
+                             catalogs, console)
         print(_as_json(args.command, shown))
         return code
-    return _dispatch(args, gateways, machine, agents, skills, scripts, catalogs)
+    return _dispatch(args, gateways, machine, agents, skills, scripts, catalogs, console)
 
 
 def _dispatch(args: argparse.Namespace, gateways, machine, agents, skills,
-              scripts, catalogs) -> int:
+              scripts, catalogs, console) -> int:
     """Which command answers this. Separated from `main` so that a verb behaves the same
     whether a person or something reading records asked for it — there is one dispatch,
     and the difference is only what is done with what it showed."""
@@ -4653,6 +4713,8 @@ def _dispatch(args: argparse.Namespace, gateways, machine, agents, skills,
         return cmd_restart(args, gateways, machine, agents)
     if args.command == "status":
         return cmd_status(args, gateways, machine, agents)
+    if args.command == "ui":
+        return cmd_ui(args, console)
     if args.command == "config":
         return cmd_config(args)
     if args.command == "backups":
