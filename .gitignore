@@ -22,6 +22,14 @@ ui/dist/
 ui/.vite/
 ui/*.tsbuildinfo
 
+# The docs site's machinery. Nothing under `site/` is tracked, and neither line changes
+# that — they are here so `git status` stays readable. Anchoring the Python `dist/` above
+# stopped it covering `site/dist` by accident, which was the only reason that build was ever
+# ignored; and with the build no longer standing in front of it, git descends and lists
+# every one of the four thousand files under `node_modules`, which was never ignored at all.
+site/node_modules/
+site/dist/
+
 # Local environment / credentials — never commit. `.env` is an exact match and does not
 # cover `.env.local`, which is where a workspace keeps a developer's own overrides.
 .env
