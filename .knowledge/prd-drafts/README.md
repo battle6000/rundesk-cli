@@ -8,4 +8,4 @@ Add a row when you add a draft; `doc-lint` fails the build if one is missing.
 
 | Draft | Proposes | Reserved namespace |
 |---|---|---|
-| _(none — `agent-store` and `lifecycle-migration` graduated into `../prd/` on 2026-07-26)_ | | |
+| [`command-console.md`](command-console.md) | An optional local window onto the command, and the machine-readable form of a listing it rests on | `CON` |

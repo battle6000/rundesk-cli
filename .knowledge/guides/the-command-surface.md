@@ -81,6 +81,7 @@ no room for.
 | Verb | What it is for |
 |---|---|
 | `status` | How rundesk is: its version, whether the supervisor answers, whether the install is fit. |
+| `ui` | Open the local console — a window onto this command, on this machine, until you stop it. |
 | `version` | What is installed, and whether that is current. |
 | `update` | Move to the newest published release. |
 | `uninstall` | Take rundesk off this machine. |

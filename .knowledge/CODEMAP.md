@@ -47,7 +47,7 @@ holds the read, the decision and the write under one `flock`. Those are what rem
 [`guides/moving-onto-the-store.md`](guides/moving-onto-the-store.md)); each one that goes takes its lock
 file with it.
 
-## Backend / Services (src/rundesk/ — 24 modules)
+## Backend / Services (src/rundesk/ — 26 modules)
 
 - `src/rundesk/cli.py` — the command surface: every verb the finished product will have, registered
   from the outset. What the gateway verbs act on is passed in rather than imported, so the surface knows
@@ -192,9 +192,24 @@ file with it.
 
 ## Frontend / UI
 
-- No UI. The command line is the whole surface.
+The command line is still the whole surface. **The console offers no operation the command does not** —
+every page on it is the output of a `rundesk` command run locally and asked for with `--json`, reported
+with that command's own exit code. It is not a second way in; it is this one, looked at.
 
-## Tests (tests/ — 30 files, ~2000 cases)
+- `src/rundesk/ui.py` — the local console: where the built files stand, what every request is answered
+  with, and the seam it reaches `rundesk` through. The first thing in rundesk that listens, so what a port
+  on the owner's machine does and does not earn is said in the module. `answered()` is the whole decision
+  and takes everything it needs as an argument, which is what lets every refusal be proven with no socket,
+  thread or process. Started only by `rundesk ui`, in the foreground, bound to loopback, and gone when the
+  person who started it is.
+- `ui/` — the console's source: React, Vite, Tailwind and shadcn/ui. **A contributor's tool, never part of
+  an install.** Building it needs Node; using rundesk does not.
+- `src/ui/dist/` — the built console, committed on purpose. That is what lets an install need no Node, no
+  package manager and no build step, and the release asset is `git archive`, so tracked is shipped. Two
+  ways it can be wrong — stale, and hand-edited — are caught by `build-info.json` plus `tests/test_ui.py`
+  with no Node installed, and again in CI by rebuilding and comparing the bytes.
+
+## Tests (tests/ — 31 files, ~2000 cases)
 
 `unittest`, run directly (`python3 tests/test_cli.py`), never touching the network and never running a
 provider. One file per contract, named for it:
@@ -224,6 +239,7 @@ provider. One file per contract, named for it:
 | `test_answering.py` | 101 | `channel-messaging` — both edges are arguments, so a routing failure and a platform failure can never be confused |
 | `test_discord.py` | 168 | `channel-discord` — the policy and never the wire: who it answers, what a mark means, how a long answer is broken up, and which single message of a turn mentions anybody |
 | `test_instructions.py` | 10 | Rundesk's core and trigger prompts, standard variables, and additive builder |
+| `test_ui.py` | 37 | the local console — every refusal driven through `answered()` with no socket, thread or process, and the committed bundle proven to be what `ui/` builds |
 | `test_ci.py` | 17 | the build topology — one PR run, bounded local and CI discovery, retained timeout diagnostics, process-tree cleanup, deterministic install catalogs, and the supported matrix |
 
 Counts drift; what must not is one file per contract. Every `prd/` row names the tests that prove it, and

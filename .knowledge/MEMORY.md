@@ -8,6 +8,32 @@ a long MEMORY means something was solved and never pruned.** This codebase only.
 
 *One bullet each: the trap, and the workaround. Delete when it's genuinely solved.*
 
+- **A command that serves forever prints nothing anyone can read, unless it flushes.** Python
+  buffers stdout in blocks whenever it is not a terminal, and a command that then blocks never
+  fills the buffer — so `rundesk ui > log &` printed its address only once the process had been
+  killed, which is exactly when it stops being useful. Measured: the log held every stderr refusal
+  and not one line of stdout. Any `print` before a long block needs `flush=True`, and a case that
+  proves it has to read the real process's pipe on a thread with a bound — waiting straight on
+  `readline()` hangs the suite instead of failing it.
+- **An unanchored directory name in `.gitignore` matches at every depth, and `!` cannot undo it.**
+  `dist/` silently excluded `src/ui/dist` — the built console, which is committed on purpose and
+  is the only thing an installed rundesk has to serve. A `!src/ui/dist/` negation does **not**
+  rescue it: git never descends into an excluded directory, so nothing under one can be
+  re-included. Anchor it (`/dist/`). Check with `git check-ignore -v <a file under it>`, which
+  prints the rule that excluded it and nothing when none did. The release asset is `git archive`,
+  so untracked is unshipped and the failure only shows on somebody else's machine.
+- **`test_install.py`'s install-instruction cases scan the whole working tree, ignore rules and
+  all.** `OneInstructionTests._gives_it` walks `REPO.rglob("*")` skipping only `.git`, `.venv`,
+  `__pycache__` and `node_modules` — so a stale local build under `site/dist` carrying a retired
+  URL fails the suite on your machine while CI, which has no `site/`, stays green. Confirm what is
+  actually disagreeing before believing it is your change: rerun that scan with the directory
+  excluded and see whether the count drops to one.
+- **The surface cases invoke every verb, so a verb that runs forever must arrive with its
+  stand-in.** `test_cli.py` walks the parser and types every form `CLI.md` lists. `ui` binds a
+  port and answers until stopped, so its collaborator has to be injectable on `cli.main` and
+  defaulted in *both* drivers in the same commit that registers the verb — not after. The same
+  hazard `_never_the_real_installer` exists for.
+
 - **Running `./rundesk` from a checkout tests new code against the live install's data, and
   nothing warns you.** An agent's shell is a gateway's child, so it already carries
   `RUNDESK_AGENTS_DIR`, `RUNDESK_HOME`, `RUNDESK_SCRIPTS` and `RUNDESK_RUN` — the *owner's*.

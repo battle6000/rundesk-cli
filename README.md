@@ -242,6 +242,8 @@ dotenv option.
 ### Operations and data
 
 - Install, automatic daily updates, version checks, status, and doctor commands
+- An optional local console — `rundesk ui` — that shows what the command shows, on this
+  machine only, for as long as you leave it running
 - Manual and automatic daily backups, restore, and configurable backup location
 - Program files under `~/.rundesk/app`; agent data and configuration under
   `~/.rundesk/data`
