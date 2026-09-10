@@ -26,7 +26,7 @@ from rundesk.agents import directory, records
 from rundesk.channels import arriving
 from rundesk.commands import agents as agents_command
 from rundesk.commands import providers as providers_command
-from rundesk.core import paths
+from rundesk.core import paths, secrets
 from rundesk.exits import FAILED, OK, USAGE
 from rundesk.gateways import standing
 from rundesk.providers import adapters, instructions, kept, turns
@@ -159,6 +159,109 @@ fi
             "providers", "logout", "a-brain", "--alias", "work")
         self.assertEqual(FAILED, code)
         self.assertIn("nothing was logged out", err)
+
+    def test_default_and_aliased_status_both_reach_the_owners_own_secret_values(self):
+        """Driven through `rundesk providers status`, the real dispatch a person types — proving
+        this end to end rather than only at `adapters.account_environment`'s own return value. A
+        status check must see what a turn would see, and an explicit alias must still be handed the
+        same owner values, since the vendor adapter — not this caller — is the one that knows which
+        of them are its own ambient authentication and removes them once it sees the alias home."""
+        told = self.home / "told.env"
+        self.an_adapter("a-brain", "#!/bin/sh\n"
+                        "if [ \"$1\" = \"--capabilities\" ]; then\n"
+                        "  printf '%s\\n' '{\"account_aliases\": true}'\n"
+                        "  exit 0\n"
+                        "fi\n"
+                        f"env > {told}\n"
+                        "printf '%s\\n' '{\"state\": \"authenticated\"}'\n")
+        secrets.stated("A_BRAIN_TOKEN", "owners-secret-value")
+
+        code, out, err = self.rundesk("providers", "status", "a-brain")
+        self.assertEqual(OK, code, err)
+        self.assertIn("authenticated", out)
+        self.assertIn("A_BRAIN_TOKEN=owners-secret-value", told.read_text(encoding="utf-8"))
+
+        code, out, err = self.rundesk("providers", "aliases", "add", "a-brain", "work")
+        self.assertEqual(OK, code, err)
+        code, out, err = self.rundesk("providers", "status", "a-brain", "--alias", "work")
+        self.assertEqual(OK, code, err)
+        said = told.read_text(encoding="utf-8")
+        self.assertIn("A_BRAIN_TOKEN=owners-secret-value", said)
+        self.assertIn("RUNDESK_PROVIDER_ALIAS=work", said)
+
+    def test_default_and_aliased_status_login_and_logout_refuse_cleanly_when_the_sealed_store_cannot_be_read(self):
+        """`environment.owners_own()` raises `secrets.Refused` when the whole sealed store — not
+        merely one value inside it — cannot be read. Driven through the real dispatch, so an
+        uncaught `secrets.Refused` would surface here exactly as it would to a person: as this
+        call raising, rather than as `_failed`'s ordinary message and exit code.
+
+        **The fake adapter's own invocation log is the proof that matters most, and it records
+        every invocation — `--capabilities` included.** A refusal that happened to print the right
+        message while still asking the adapter what it can do, or running `--account-login` or
+        `--account-logout` against a half-built environment, would be a worse bug than the
+        traceback this closes: this is `_account_owners` earning readiness from the sealed store
+        *before* any program is started at all, not the adapter declining on its own."""
+        invocations = self.home / "invocations.log"
+        self.an_adapter("a-brain", "#!/bin/sh\n"
+                        f"printf '%s\\n' \"$*\" >> {invocations}\n"
+                        "if [ \"$1\" = \"--capabilities\" ]; then\n"
+                        "  printf '%s\\n' '{\"account_aliases\": true}'\n"
+                        "  exit 0\n"
+                        "fi\n"
+                        "if [ \"$1\" = \"--account-status\" ]; then\n"
+                        "  printf '%s\\n' '{\"state\": \"authenticated\"}'\n"
+                        "fi\n"
+                        "exit 0\n")
+        self.rundesk("providers", "aliases", "add", "a-brain", "work")
+        secrets.stated("A_BRAIN_TOKEN", "owners-secret-value")
+        secrets.where().write_text("not json", encoding="utf-8")
+        # `aliases add` itself earns real `--capabilities`/`--account-status` invocations to
+        # report — taken as the baseline the six calls below must add nothing to, rather than
+        # deleting the log, so a case that failed here would show exactly what ran and nothing is
+        # lost to a mistimed cleanup.
+        before = invocations.read_text(encoding="utf-8")
+
+        code, _out, err = self.rundesk("providers", "status", "a-brain")
+        self.assertEqual(FAILED, code)
+        self.assertIn("unable to check authentication", err)
+
+        code, _out, err = self.rundesk("providers", "status", "a-brain", "--alias", "work")
+        self.assertEqual(FAILED, code)
+        self.assertIn("unable to check authentication", err)
+
+        code, _out, err = self.rundesk("providers", "login", "a-brain")
+        self.assertEqual(FAILED, code)
+        self.assertIn("login did not earn authenticated status", err)
+
+        code, _out, err = self.rundesk("providers", "login", "a-brain", "--alias", "work")
+        self.assertEqual(FAILED, code)
+        self.assertIn("login did not earn authenticated status", err)
+
+        code, _out, err = self.rundesk("providers", "logout", "a-brain", "--confirm")
+        self.assertEqual(FAILED, code)
+        self.assertIn("logout did not earn signed-out status", err)
+
+        code, _out, err = self.rundesk(
+            "providers", "logout", "a-brain", "--alias", "work", "--confirm")
+        self.assertEqual(FAILED, code)
+        self.assertIn("logout did not earn signed-out status", err)
+
+        self.assertEqual(
+            before, invocations.read_text(encoding="utf-8"),
+            "the fake adapter was run — even just for --capabilities — against an unreadable "
+            "sealed store, before any of the six calls above could have earned an invocation")
+
+    def test_an_unsupported_provider_still_refuses_normally_when_the_store_is_readable(self):
+        """The readiness check this closes must not become a second reason every ordinary refusal
+        routes through — an adapter that plainly does not support aliases is still refused for
+        that reason, and only that reason, once the sealed store itself is not in question."""
+        self.an_adapter("a-brain", SAYS_NOTHING)
+        for words in (("status", "a-brain"), ("login", "a-brain"),
+                      ("logout", "a-brain", "--confirm")):
+            with self.subTest(words=words):
+                code, _out, err = self.rundesk("providers", *words)
+                self.assertEqual(FAILED, code)
+                self.assertIn("does not support account aliases", err)
 
     def test_remove_requires_confirmation_and_refuses_an_agent_default(self):
         self.rundesk("providers", "aliases", "add", "a-brain", "work")

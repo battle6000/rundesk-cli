@@ -247,6 +247,66 @@ class AccountManagement(support.Isolated):
                 self.assertEqual(1, got.returncode)
                 self.assertEqual({"state": "unable_to_check"}, json.loads(got.stdout))
 
+    def fake_claude_watching_auth(self):
+        """Reports whether `claude` was actually handed `ANTHROPIC_API_KEY`,
+        `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN` — Claude accepts any of them without
+        looking in `CLAUDE_CONFIG_DIR` at all, so `fake_claude`'s single observed value cannot
+        prove any of them was removed."""
+        instead = self.home / "bin"
+        instead.mkdir(exist_ok=True)
+        observed = self.home / "observed.json"
+        brain = instead / "claude"
+        brain.write_text('''#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1:4] == ["auth", "status", "--json"]:
+    with open(os.environ["OBSERVED"], "w", encoding="utf-8") as writing:
+        json.dump({"CLAUDE_CONFIG_DIR": os.environ.get("CLAUDE_CONFIG_DIR"),
+                   "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY"),
+                   "ANTHROPIC_AUTH_TOKEN": os.environ.get("ANTHROPIC_AUTH_TOKEN"),
+                   "CLAUDE_CODE_OAUTH_TOKEN": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")}, writing)
+    print(json.dumps({"loggedIn": True}))
+    raise SystemExit(0)
+raise SystemExit(1)
+''', encoding="utf-8")
+        brain.chmod(0o755)
+        return instead, observed
+
+    def test_default_status_still_carries_the_owners_own_ambient_credentials(self):
+        instead, observed = self.fake_claude_watching_auth()
+        env = os.environ.copy()
+        env.update({"PATH": f"{instead}:/usr/bin:/bin", "OBSERVED": str(observed),
+                    "ANTHROPIC_API_KEY": "owners-key", "ANTHROPIC_AUTH_TOKEN": "owners-token",
+                    "CLAUDE_CODE_OAUTH_TOKEN": "owners-oauth-token"})
+        env.pop("RUNDESK_PROVIDER_ACCOUNT_HOME", None)
+        got = subprocess.run(
+            [str(ADAPTER), "--account-status"], capture_output=True, text=True,
+            timeout=PATIENCE, env=env, check=False)
+        self.assertEqual({"state": "authenticated"}, json.loads(got.stdout))
+        observed_env = json.loads(observed.read_text(encoding="utf-8"))
+        self.assertEqual("owners-key", observed_env["ANTHROPIC_API_KEY"])
+        self.assertEqual("owners-token", observed_env["ANTHROPIC_AUTH_TOKEN"])
+        self.assertEqual("owners-oauth-token", observed_env["CLAUDE_CODE_OAUTH_TOKEN"])
+
+    def test_an_alias_removes_every_ambient_credential(self):
+        instead, observed = self.fake_claude_watching_auth()
+        account_home = self.home / "provider-accounts" / "claude" / "work" / "home"
+        account_home.mkdir(parents=True)
+        env = os.environ.copy()
+        env.update({"PATH": f"{instead}:/usr/bin:/bin", "OBSERVED": str(observed),
+                    "RUNDESK_PROVIDER_ALIAS": "work",
+                    "RUNDESK_PROVIDER_ACCOUNT_HOME": str(account_home),
+                    "ANTHROPIC_API_KEY": "owners-key", "ANTHROPIC_AUTH_TOKEN": "owners-token",
+                    "CLAUDE_CODE_OAUTH_TOKEN": "owners-oauth-token"})
+        got = subprocess.run(
+            [str(ADAPTER), "--account-status"], capture_output=True, text=True,
+            timeout=PATIENCE, env=env, check=False)
+        self.assertEqual({"state": "authenticated"}, json.loads(got.stdout))
+        observed_env = json.loads(observed.read_text(encoding="utf-8"))
+        self.assertEqual(str(account_home), observed_env["CLAUDE_CONFIG_DIR"])
+        self.assertIsNone(observed_env["ANTHROPIC_API_KEY"])
+        self.assertIsNone(observed_env["ANTHROPIC_AUTH_TOKEN"])
+        self.assertIsNone(observed_env["CLAUDE_CODE_OAUTH_TOKEN"])
+
 
 class OneCapturedTurn(support.Isolated):
     """One real turn, replayed, and every reading the adapter makes of it."""

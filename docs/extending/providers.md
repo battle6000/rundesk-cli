@@ -181,13 +181,33 @@ nothing for it to log in, out of, or check.
 
 Login, status, and logout launch the provider adapter's official account commands. Rundesk reports
 only `authenticated`, `signed_out`, or `unable_to_check`; it never reads or prints provider identity
-or credential fields. Claude aliases set `CLAUDE_CONFIG_DIR` to their private provider-owned home.
-The omitted account does not add or change that variable. Explicit delegation aliases are immutable
-through admission, child turn, environment, and session; a missing alias fails rather than falling
-back. Logout and removal refuse the exact account while a turn is active; login and ordinary default
-changes are allowed, and an admitted turn keeps its resolved selection while later turns receive the
-new default. Relative and absolute path spellings share one alias registry and aliased session
-identity; explicit delegation keeps requested spelling separate from canonical effective identity.
+or credential fields. Claude aliases set `CLAUDE_CONFIG_DIR`, Codex aliases set `CODEX_HOME`, and
+Grok aliases set `GROK_HOME` to their private provider-owned home. Codex additionally selects its
+documented file credential store so an alias cannot reuse a machine-wide keyring login. Claude,
+Codex, and Grok each remove their own documented ambient authentication variables from an explicit
+alias invocation — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN` for
+Claude; `XAI_API_KEY` and `GROK_CODE_XAI_API_KEY` for Grok, the documented global fallback pair a
+model with no configuration of its own falls back to — so an empty alias cannot silently fall back
+to the ordinary account. A model's own `env_key` or `env_http_headers` is alias-owned configuration
+an owner must set up deliberately, never an implicit fallback, so Grok does not strip those. An
+omitted alias adds no variable, removes no variable, and adds no command option.
+
+**A Codex alias fails closed on Amazon Bedrock's own AWS SDK credential chain, rather than
+supporting it.** Codex's Bedrock auth modes read an AWS bearer token or access keys directly from
+the environment before falling to the AWS SDK's default chain — none of it scoped to `CODEX_HOME`.
+An explicit alias removes every one of those inputs; the two the chain would still reach on its own
+— a shared config/credentials file under `$HOME` and, last, the EC2 instance metadata service — are
+closed by rooting the file lookups inside the alias's own account home and by the AWS SDK's own
+`AWS_EC2_METADATA_DISABLED` opt-out, rather than by attempting to support either as an
+alias-scoped credential source. A Bedrock login Codex itself manages is unaffected: it is stored in
+`CODEX_HOME/auth.json` through the same file store, and is therefore already isolated per alias.
+
+Explicit delegation aliases are immutable through admission, child turn, environment, and session;
+a missing alias fails rather than falling back. Logout and removal refuse the exact account while a
+turn is active; login and ordinary default changes are allowed, and an admitted turn keeps its
+resolved selection while later turns receive the new default. Relative and absolute path spellings
+share one alias registry and aliased session identity; explicit delegation keeps requested spelling
+separate from canonical effective identity.
 
 A saved handle is resumed only when this provider's latest turn has the same instruction
 fingerprint as the prompt being composed now. A changed access mode, operating rule, owner addition,

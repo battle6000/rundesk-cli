@@ -19,6 +19,7 @@ Run directly: `python3 tests/test_providers_grok.py`
 """
 
 import json
+import os
 import subprocess
 import unittest
 
@@ -149,6 +150,134 @@ class Capabilities(support.Isolated):
         self.assertEqual(0, got.returncode)
         self.assertTrue(can["tools"])
         self.assertNotIn("grok_cli", can)
+
+    def test_it_reports_support_for_additional_account_aliases(self):
+        _got, can = self.answered()
+        self.assertTrue(can["account_aliases"])
+
+
+class AccountManagement(support.Isolated):
+    def fake_grok(self):
+        instead = self.home / "bin"
+        instead.mkdir(exist_ok=True)
+        observed = self.home / "observed.json"
+        brain = instead / "grok"
+        brain.write_text('''#!/usr/bin/env python3
+import json, os, signal, sys
+with open(os.environ["OBSERVED"], "w", encoding="utf-8") as writing:
+    json.dump({"argv": sys.argv[1:], "GROK_HOME": os.environ.get("GROK_HOME"),
+               "XAI_API_KEY": os.environ.get("XAI_API_KEY"),
+               "GROK_CODE_XAI_API_KEY": os.environ.get("GROK_CODE_XAI_API_KEY"),
+               "XAI_TENANT_KEY": os.environ.get("XAI_TENANT_KEY"),
+               "GROK_AUTH_PROVIDER_TOKEN": os.environ.get("GROK_AUTH_PROVIDER_TOKEN"),
+               "GROK_OIDC_TOKEN": os.environ.get("GROK_OIDC_TOKEN"),
+               "GROK_DEPLOYMENT_KEY": os.environ.get("GROK_DEPLOYMENT_KEY")}, writing)
+if os.environ.get("FAKE_SIGNAL"):
+    os.kill(os.getpid(), signal.SIGTERM)
+if os.environ.get("FAKE_STDOUT"):
+    print(os.environ["FAKE_STDOUT"])
+if os.environ.get("FAKE_STDERR"):
+    print(os.environ["FAKE_STDERR"], file=sys.stderr)
+raise SystemExit(int(os.environ.get("FAKE_CODE", "0")))
+''', encoding="utf-8")
+        brain.chmod(0o755)
+        return instead, observed
+
+    def called(self, option, stdout="", code=0, **also):
+        instead, observed = self.fake_grok()
+        env = os.environ.copy()
+        env.update({"PATH": f"{instead}:/usr/bin:/bin", "OBSERVED": str(observed),
+                    "FAKE_STDOUT": stdout, "FAKE_CODE": str(code)})
+        env.update(also)
+        got = subprocess.run([str(ADAPTER), option], capture_output=True, text=True,
+                             timeout=PATIENCE, env=env, check=False)
+        return got, json.loads(observed.read_text(encoding="utf-8"))
+
+    def test_default_status_preserves_the_existing_default_environment(self):
+        got, observed = self.called("--account-status", stdout="You are using XAI_API_KEY.",
+                                    GROK_HOME="owners-value", XAI_API_KEY="owners-key",
+                                    GROK_CODE_XAI_API_KEY="owners-code-key")
+        self.assertEqual({"state": "authenticated"}, json.loads(got.stdout))
+        self.assertEqual(["models"], observed["argv"])
+        self.assertEqual("owners-value", observed["GROK_HOME"])
+        self.assertEqual("owners-key", observed["XAI_API_KEY"])
+        self.assertEqual("owners-code-key", observed["GROK_CODE_XAI_API_KEY"])
+
+    def test_an_alias_uses_its_home_and_no_ambient_authentication(self):
+        account_home = self.home / "provider-accounts" / "grok" / "work" / "home"
+        account_home.mkdir(parents=True)
+        got, observed = self.called(
+            "--account-status", stdout="You are not authenticated.\n\nDefault model: grok-4.6",
+            RUNDESK_PROVIDER_ALIAS="work", RUNDESK_PROVIDER_ACCOUNT_HOME=str(account_home),
+            GROK_HOME="owners-value", XAI_API_KEY="owners-key",
+            GROK_CODE_XAI_API_KEY="owners-code-key", XAI_TENANT_KEY="owners-tenant-key",
+            GROK_AUTH_PROVIDER_TOKEN="owners-token", GROK_OIDC_TOKEN="owners-oidc-token",
+            GROK_DEPLOYMENT_KEY="owners-deployment-key")
+        self.assertEqual({"state": "signed_out"}, json.loads(got.stdout))
+        self.assertEqual(["models"], observed["argv"])
+        self.assertEqual(str(account_home), observed["GROK_HOME"])
+        self.assertIsNone(observed["XAI_API_KEY"])
+        self.assertIsNone(observed["GROK_CODE_XAI_API_KEY"])
+        self.assertIsNone(observed["GROK_AUTH_PROVIDER_TOKEN"])
+        self.assertIsNone(observed["GROK_OIDC_TOKEN"])
+        self.assertIsNone(observed["GROK_DEPLOYMENT_KEY"])
+        self.assertEqual(
+            "owners-tenant-key", observed["XAI_TENANT_KEY"],
+            "an arbitrary XAI_-prefixed model variable is alias-owned configuration, not an "
+            "implicit fallback, and a prefix match would have removed it along with the two "
+            "documented global fallback names")
+
+    def test_login_and_logout_use_groks_native_commands_at_the_same_alias_boundary(self):
+        account_home = self.home / "provider-accounts" / "grok" / "work" / "home"
+        account_home.mkdir(parents=True)
+        for option, command in (("--account-login", "login"), ("--account-logout", "logout")):
+            with self.subTest(option=option):
+                got, observed = self.called(
+                    option, RUNDESK_PROVIDER_ACCOUNT_HOME=str(account_home),
+                    XAI_API_KEY="owners-key")
+                self.assertEqual(0, got.returncode)
+                self.assertEqual([command], observed["argv"])
+                self.assertEqual(str(account_home), observed["GROK_HOME"])
+                self.assertIsNone(observed["XAI_API_KEY"])
+
+    def test_interrupted_malformed_and_unexpected_statuses_are_not_authoritative(self):
+        fixtures = (("something new", 0, {}), ("You are logged in with grok.com.", 2, {}),
+                    ("You are logged in with grok.com.\nYou are not authenticated.", 0, {}),
+                    ("", 0, {"FAKE_SIGNAL": "1"}))
+        for status, code, also in fixtures:
+            with self.subTest(status=status, code=code, also=also):
+                got, _observed = self.called("--account-status", stdout=status, code=code, **also)
+                self.assertEqual(1, got.returncode)
+                self.assertEqual({"state": "unable_to_check"}, json.loads(got.stdout))
+
+    def test_every_official_authenticated_form_is_recognized(self):
+        """Read out of `xai-grok-pager/src/models.rs::list_available_models` rather than assumed:
+        each of the five `AuthStatus` arms prints one exact `println!`, including the
+        model-credential and deployment-key forms alongside a browser login and `XAI_API_KEY`."""
+        forms = ("You are using XAI_API_KEY.", "You are authenticated via deployment key.",
+                 "You are logged in with grok.com.",
+                 "Model 'grok-4.6' is using its own API key.")
+        for stdout in forms:
+            with self.subTest(stdout=stdout):
+                got, _observed = self.called("--account-status", stdout=stdout, code=0)
+                self.assertEqual({"state": "authenticated"}, json.loads(got.stdout))
+
+    def test_shared_prefix_text_that_is_not_an_official_form_is_not_authoritative(self):
+        """`"You are logged in"` starts the one true sentence and would start a broken vendor
+        build, an `AuthStatus` arm this adapter does not know, or a deliberately spoofed stream
+        just as easily — a prefix match would read any of those as authenticated."""
+        forms = ("You are logged in", "You are logged in eventually",
+                 "You are logged in with .", "Model '' is using its own API key.")
+        for stdout in forms:
+            with self.subTest(stdout=stdout):
+                got, _observed = self.called("--account-status", stdout=stdout, code=0)
+                self.assertEqual({"state": "unable_to_check"}, json.loads(got.stdout))
+
+    def test_a_missing_grok_is_not_reported_as_an_account_state(self):
+        got = subprocess.run([str(ADAPTER), "--account-status"], capture_output=True, text=True,
+                             timeout=PATIENCE, env={"PATH": NO_VENDOR}, check=False)
+        self.assertEqual(1, got.returncode)
+        self.assertEqual({"state": "unable_to_check"}, json.loads(got.stdout))
 
 
 class OneCapturedTurn(support.Isolated):
@@ -349,7 +478,11 @@ class WhatItAsksTheBrainFor(support.Isolated):
     BRAIN = '''#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["HEARD"], "a") as writing:
-    writing.write(json.dumps({"argv": sys.argv[1:]}) + "\\n")
+    writing.write(json.dumps({"argv": sys.argv[1:], "GROK_HOME": os.environ.get("GROK_HOME"),
+                              "has_XAI_API_KEY": "XAI_API_KEY" in os.environ,
+                              "has_GROK_CODE_XAI_API_KEY":
+                                  "GROK_CODE_XAI_API_KEY" in os.environ,
+                              "has_XAI_TENANT_KEY": "XAI_TENANT_KEY" in os.environ}) + "\\n")
 if "--capabilities" in sys.argv[1:]:
     print('{"tools": true}'); raise SystemExit(0)
 
@@ -438,6 +571,32 @@ for line in sys.stdin:
     def test_it_asks_for_the_transport_the_vendor_documents(self):
         self.spoken = self.spoke()
         self.assertEqual(["agent", "--always-approve", "stdio"], self.argv()[-3:])
+
+    def test_an_alias_is_the_home_used_by_the_turn_without_ambient_authentication(self):
+        account_home = self.home / "provider-accounts" / "grok" / "work" / "home"
+        account_home.mkdir(parents=True)
+        self.spoken = self.spoke(RUNDESK_PROVIDER_ALIAS="work",
+                                 RUNDESK_PROVIDER_ACCOUNT_HOME=str(account_home),
+                                 GROK_HOME="owners-value", XAI_API_KEY="owners-key",
+                                 GROK_CODE_XAI_API_KEY="owners-code-key",
+                                 XAI_TENANT_KEY="owners-tenant-key")
+        started = next(one for one in self.spoken if "argv" in one)
+        self.assertEqual(str(account_home), started["GROK_HOME"])
+        self.assertFalse(started["has_XAI_API_KEY"])
+        self.assertFalse(started["has_GROK_CODE_XAI_API_KEY"])
+        self.assertTrue(
+            started["has_XAI_TENANT_KEY"],
+            "an arbitrary XAI_-prefixed model variable is alias-owned configuration, not an "
+            "implicit fallback, and a prefix match would have removed it along with the two "
+            "documented global fallback names")
+
+    def test_an_unaliased_turn_preserves_the_owners_grok_environment(self):
+        self.spoken = self.spoke(GROK_HOME="owners-value", XAI_API_KEY="owners-key",
+                                 GROK_CODE_XAI_API_KEY="owners-code-key")
+        started = next(one for one in self.spoken if "argv" in one)
+        self.assertEqual("owners-value", started["GROK_HOME"])
+        self.assertTrue(started["has_XAI_API_KEY"])
+        self.assertTrue(started["has_GROK_CODE_XAI_API_KEY"])
 
     def test_one_conversation_never_answers_out_of_another(self):
         """**`--no-memory` is not a preference.** Without it this brain answers from conversations

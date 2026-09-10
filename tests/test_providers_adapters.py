@@ -14,7 +14,7 @@ from unittest import mock
 import support
 from rundesk.agents import directory
 from rundesk.core import adapters as core_adapters
-from rundesk.core import paths
+from rundesk.core import paths, secrets
 from rundesk.providers import adapters
 from rundesk.utils import programs
 
@@ -304,6 +304,36 @@ class ManagingAnAccount(Adapters):
         self.assertEqual("work", environment[adapters.PROVIDER_ALIAS])
         self.assertEqual(str(account_home), environment[adapters.PROVIDER_ACCOUNT_HOME])
 
+    def test_default_management_environment_still_carries_the_owners_own_values(self):
+        """A status/login/logout check must see what a turn would see, or checking the ordinary
+        account reports it signed out when the owner authenticates through a value kept in
+        Rundesk's own sealed store rather than this process's own environment."""
+        secrets.stated("CODEX_ACCESS_TOKEN", "owners-secret-value")
+        environment = adapters.account_environment(None, None)
+        self.assertEqual("owners-secret-value", environment["CODEX_ACCESS_TOKEN"])
+
+    def test_alias_management_environment_still_carries_the_owners_own_values(self):
+        """The vendor adapter is the one that knows which of these are its own ambient
+        authentication and removes them once it sees `PROVIDER_ACCOUNT_HOME` — a caller that
+        withheld them here would leave that adapter-side removal nothing to prove it did."""
+        secrets.stated("CODEX_ACCESS_TOKEN", "owners-secret-value")
+        account_home = self.home / "account-home"
+        environment = adapters.account_environment("work", account_home)
+        self.assertEqual("owners-secret-value", environment["CODEX_ACCESS_TOKEN"])
+
+    def test_owner_values_may_never_take_the_alias_boundarys_reserved_names(self):
+        """Deciding to leave a name unset for the default account is still Rundesk deciding —
+        exactly as `environment.for_turn` reserves the same two names for a turn."""
+        secrets.stated(adapters.PROVIDER_ALIAS, "hijacked")
+        secrets.stated(adapters.PROVIDER_ACCOUNT_HOME, "hijacked")
+        default = adapters.account_environment(None, None)
+        self.assertNotIn(adapters.PROVIDER_ALIAS, default)
+        self.assertNotIn(adapters.PROVIDER_ACCOUNT_HOME, default)
+        account_home = self.home / "account-home"
+        aliased = adapters.account_environment("work", account_home)
+        self.assertEqual("work", aliased[adapters.PROVIDER_ALIAS])
+        self.assertEqual(str(account_home), aliased[adapters.PROVIDER_ACCOUNT_HOME])
+
     def test_status_normalizes_only_the_public_state(self):
         def ran(argv, waiting, env):
             self.assertEqual("--account-status", argv[-1])
@@ -325,6 +355,37 @@ class ManagingAnAccount(Adapters):
         self.assertEqual("authenticated", got)
         self.assertEqual("--account-login", calls[0][0])
         self.assertEqual("work", calls[0][1][adapters.PROVIDER_ALIAS])
+
+    def dumping(self, told):
+        """An adapter that supports aliases and writes its whole received environment down,
+        rather than one this suite asks what it saw — the caller-level proof `account_environment`
+        alone cannot give, because a value present in a dict and a value that reached a real
+        adapter process are two different claims."""
+        self.ships("mine", "#!/bin/sh\n"
+                           "if [ \"$1\" = \"--capabilities\" ]; then\n"
+                           "  printf '%s\\n' '{\"account_aliases\": true}'\n"
+                           "  exit 0\n"
+                           "fi\n"
+                           f"env > {told}\n"
+                           "printf '%s\\n' '{\"state\": \"authenticated\"}'\n")
+
+    def test_default_status_reaches_the_owners_own_values_through_the_real_process(self):
+        told = self.home / "told.env"
+        self.dumping(told)
+        secrets.stated("A_BRAIN_TOKEN", "owners-secret-value")
+        self.assertEqual("authenticated", adapters.account_status("mine", None, None))
+        self.assertIn("A_BRAIN_TOKEN=owners-secret-value", told.read_text(encoding="utf-8"))
+
+    def test_an_aliased_status_still_reaches_the_owners_own_values_through_the_real_process(self):
+        told = self.home / "told.env"
+        self.dumping(told)
+        secrets.stated("A_BRAIN_TOKEN", "owners-secret-value")
+        account_home = self.home / "provider-accounts" / "mine" / "work" / "home"
+        self.assertEqual(
+            "authenticated", adapters.account_status("mine", "work", account_home))
+        said = told.read_text(encoding="utf-8")
+        self.assertIn("A_BRAIN_TOKEN=owners-secret-value", said)
+        self.assertIn(f"{adapters.PROVIDER_ACCOUNT_HOME}={account_home}", said)
 
 
 class WhichInterpreterRunsOne(Adapters):

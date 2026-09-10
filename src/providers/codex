@@ -15,9 +15,12 @@ server puts in its own user agent, and `threadSource` says `rundesk` so the owne
 shows where a thread came from. No credential is read, copied or moved; the owner signs in with
 `codex login` and this never learns how that worked.
 
-Two invocations, sharing almost nothing:
+Five invocations, sharing almost nothing:
 
     --capabilities   what this can do — offline, no account, the same answer every time
+    --account-status normalize the official login status without exposing identity
+    --account-login  run the official interactive login
+    --account-logout run the official logout
     (no argument)    one turn: the prompt arrives as records on stdin, records come back on stdout
 
 ## What was measured rather than assumed
@@ -72,6 +75,59 @@ from pathlib import Path
 #: changes the default transport fails loudly here instead of hanging with nothing on the pipe.
 CODEX = "codex"
 APP_SERVER = ("app-server", "--stdio")
+
+#: Codex may otherwise use a machine-wide keyring even when `CODEX_HOME` points at an alias. The
+#: documented file store keeps an aliased login inside that provider-owned home instead. It is
+#: passed only for an explicit alias; the ordinary account's command line remains byte-for-byte the
+#: one it was before aliases existed.
+FILE_CREDENTIALS = 'cli_auth_credentials_store="file"'
+
+#: Authentication inputs accepted without looking in `CODEX_HOME`. An explicit alias must not fall
+#: back to any of them or a missing alias login would silently become the ordinary account. Other
+#: OpenAI settings remain available to the brain.
+AMBIENT_AUTH = ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY",
+                "OPENAI_FEDERATION_RULE_ID")
+
+#: Every AWS input Codex's Amazon Bedrock auth modes read directly from the environment — read out
+#: of `codex-rs/model-provider/src/amazon_bedrock/auth.rs::auth_source`, which tries an env bearer
+#: token, then env access keys, before falling to the AWS SDK's own default chain. None of these is
+#: scoped to `CODEX_HOME`: a Bedrock login Codex itself manages is stored in `CODEX_HOME/auth.json`
+#: through the same file store `FILE_CREDENTIALS` selects and is therefore already isolated per
+#: alias, but any of these left alone would authenticate an alias as the ordinary account's, or the
+#: machine's own, AWS identity instead.
+AWS_AMBIENT_AUTH = (
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+)
+
+#: **The explicit decision: Codex aliases fail closed on the AWS SDK's own default chain, rather
+#: than supporting it.** Every name in `AWS_AMBIENT_AUTH` is removed, which is enough on its own for
+#: every source `auth_source` tries *before* falling to that default chain. What is left, and what
+#: this closes: that chain still checks a shared config/credentials file under `$HOME` — a path
+#: `CODEX_HOME` does not touch and this adapter has no owner-scoped equivalent for — and, last, the
+#: EC2 instance metadata service, which is the *machine's* identity and never an owner's or an
+#: alias's. Rooting the file lookups at paths inside the alias's own account home, rather than
+#: merely unsetting the variables that name them, is what keeps the default `~/.aws/*` location
+#: from being found regardless of `$HOME`; `AWS_EC2_METADATA_DISABLED` is the AWS SDK's own
+#: documented opt-out for the metadata service and this is the one place Rundesk sets a value
+#: rather than only removing one, because there is no variable to remove that would close it.
+AWS_CREDENTIAL_FILES_DISABLED = ("aws-shared-credentials-disabled", "aws-config-disabled")
+
+#: Every line `codex login status` prints for a signed-in account, and no other — read out of
+#: `codex-rs/cli/src/login.rs::run_login_status` rather than assumed from a prefix. Each of the
+#: seven `AuthMode` arms prints one exact sentence, save the API-key arm, which prints a *masked*
+#: key through `safe_format_key`: `"***"` at thirteen characters or under, else an eight-character
+#: prefix, `"***"`, and a five-character suffix — never the key. **A shared prefix is not a shared
+#: sentence.** `"Logged in using "` starts seven true sentences and every false one a broken vendor
+#: build, a future arm this adapter does not know, or a deliberately spoofed stream could print —
+#: so this matches the seven endings that exist today and nothing merely shaped like one.
+LOGGED_IN = re.compile(
+    r"^Logged in using (?:workload identity|ChatGPT|access token|personal access token|"
+    r"Amazon Bedrock API key|Amazon Bedrock AWS access keys|"
+    r"an API key - (?:\*\*\*|.{8}\*\*\*.{5}))$")
 
 #: What this says it is, and what the server puts in its own user agent. Honest identification is
 #: the point — see the module docstring on why nothing here pretends to be somebody else.
@@ -180,6 +236,12 @@ def main() -> int:
     if "--capabilities" in sys.argv[1:]:
         say(what_this_can_do())
         return 0
+    if "--account-status" in sys.argv[1:]:
+        return account_status()
+    if "--account-login" in sys.argv[1:]:
+        return account_login()
+    if "--account-logout" in sys.argv[1:]:
+        return account_logout()
     return one_turn()
 
 
@@ -194,7 +256,8 @@ def what_this_can_do() -> dict:
     a vendor upgrade that changes behaviour is visible in the record afterwards rather than being a
     thing somebody has to remember.
     """
-    can = {"tools": True, "resume": True, "model": True, "usage": True, "steer": True}
+    can = {"tools": True, "resume": True, "model": True, "usage": True, "steer": True,
+           "account_aliases": True}
     version = the_version()
     if version:
         can["codex_cli"] = version
@@ -212,6 +275,80 @@ def the_version() -> str:
     return got.stdout.strip().splitlines()[0] if got.stdout.strip() else ""
 
 
+# ── Account boundary ──────────────────────────────────────────────────────────────────────────
+
+def the_environment() -> dict:
+    """Give an explicit alias its own Codex state and no ambient authentication fallback.
+
+    **The ordinary account is unchanged.** With no provider account home this returns an exact copy
+    of the adapter environment and `codex` keeps using its existing home, keyring, and environment.
+    Rundesk creates an alias home before invoking the adapter; neither side reads or copies a
+    credential.
+
+    **An alias fails closed on Amazon Bedrock's own AWS SDK fallback** — see `AWS_AMBIENT_AUTH` and
+    `AWS_CREDENTIAL_FILES_DISABLED` for why removing the named variables alone is not enough.
+    """
+    env = os.environ.copy()
+    account_home = os.environ.get("RUNDESK_PROVIDER_ACCOUNT_HOME")
+    if account_home:
+        for name in AMBIENT_AUTH + AWS_AMBIENT_AUTH:
+            env.pop(name, None)
+        env["CODEX_HOME"] = account_home
+        shared_credentials, config = AWS_CREDENTIAL_FILES_DISABLED
+        env["AWS_SHARED_CREDENTIALS_FILE"] = str(Path(account_home) / shared_credentials)
+        env["AWS_CONFIG_FILE"] = str(Path(account_home) / config)
+        env["AWS_EC2_METADATA_DISABLED"] = "true"
+    return env
+
+
+def codex_command(*arguments: str) -> list:
+    """A Codex command at the exact account boundary Rundesk selected."""
+    argv = [CODEX]
+    if os.environ.get("RUNDESK_PROVIDER_ACCOUNT_HOME"):
+        argv += ["-c", FILE_CREDENTIALS]
+    return argv + list(arguments)
+
+
+def account_status() -> int:
+    """Normalize Codex's official status without returning identity or credential material."""
+    try:
+        got = subprocess.run(codex_command("login", "status"), capture_output=True, text=True,
+                             timeout=VERSION_WITHIN, check=False, env=the_environment())
+    except (OSError, subprocess.SubprocessError):
+        got = None
+    lines = [line.strip() for part in
+             ((got.stdout if got else ""), (got.stderr if got else ""))
+             for line in part.splitlines() if line.strip()]
+    authenticated = any(LOGGED_IN.match(line) for line in lines)
+    signed_out = "Not logged in" in lines
+    if got and got.returncode == 0 and authenticated and not signed_out:
+        say({"state": "authenticated"})
+        return 0
+    if got and got.returncode == 1 and signed_out and not authenticated:
+        say({"state": "signed_out"})
+        return 0
+    say({"state": "unable_to_check"})
+    return 1
+
+
+def account_login() -> int:
+    """Run Codex's provider-owned interactive login attached to this terminal."""
+    try:
+        return subprocess.run(codex_command("login"), check=False,
+                              env=the_environment()).returncode
+    except OSError:
+        return 1
+
+
+def account_logout() -> int:
+    """Run Codex's provider-owned logout for this exact environment boundary."""
+    try:
+        return subprocess.run(codex_command("logout"), check=False,
+                              env=the_environment()).returncode
+    except OSError:
+        return 1
+
+
 # ── One turn ──────────────────────────────────────────────────────────────────────────────────
 
 def one_turn() -> int:
@@ -225,8 +362,8 @@ def one_turn() -> int:
     raw = os.environ.get("RUNDESK_RAW")
     try:
         brain = subprocess.Popen(
-            [CODEX, *APP_SERVER], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=None, text=True, bufsize=1, cwd=where, env=os.environ.copy(),
+            codex_command(*APP_SERVER), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=None, text=True, bufsize=1, cwd=where, env=the_environment(),
             # **`errors="replace"`, and it is not tidiness.** A coding agent reads binary files, and
             # what a tool printed comes back inside `aggregatedOutput` — so one stray byte is a
             # `UnicodeDecodeError` raised *inside* the read, past every guard a caller can put

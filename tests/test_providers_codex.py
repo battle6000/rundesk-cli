@@ -19,6 +19,7 @@ Run directly: `python3 tests/test_providers_codex.py`
 """
 
 import json
+import os
 import subprocess
 import unittest
 
@@ -94,6 +95,207 @@ class Capabilities(support.Isolated):
         """`--capabilities` is what lets an absence be a fact rather than a guess, so it must not
         need the brain to be installed to say what the adapter can do."""
         self.assertNotIn("codex_cli", self.asked())
+
+    def test_it_reports_support_for_additional_account_aliases(self):
+        self.assertTrue(self.asked()["account_aliases"])
+
+
+class AccountManagement(support.Isolated):
+    def fake_codex(self):
+        instead = self.home / "bin"
+        instead.mkdir(exist_ok=True)
+        observed = self.home / "observed.json"
+        brain = instead / "codex"
+        brain.write_text('''#!/usr/bin/env python3
+import json, os, signal, sys
+WATCHED = ("CODEX_HOME", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_API_KEY",
+           "OPENAI_FEDERATION_RULE_ID", "AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID",
+           "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE",
+           "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME",
+           "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+           "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+           "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_EC2_METADATA_DISABLED")
+with open(os.environ["OBSERVED"], "w", encoding="utf-8") as writing:
+    json.dump({"argv": sys.argv[1:], **{name: os.environ.get(name) for name in WATCHED}}, writing)
+if os.environ.get("FAKE_SIGNAL"):
+    os.kill(os.getpid(), signal.SIGTERM)
+if os.environ.get("FAKE_STDOUT"):
+    print(os.environ["FAKE_STDOUT"])
+if os.environ.get("FAKE_STDERR"):
+    print(os.environ["FAKE_STDERR"], file=sys.stderr)
+raise SystemExit(int(os.environ.get("FAKE_CODE", "0")))
+''', encoding="utf-8")
+        brain.chmod(0o755)
+        return instead, observed
+
+    def called(self, option, stdout="", code=0, **also):
+        instead, observed = self.fake_codex()
+        env = os.environ.copy()
+        env.update({"PATH": f"{instead}:/usr/bin:/bin", "OBSERVED": str(observed),
+                    "FAKE_STDOUT": stdout, "FAKE_CODE": str(code)})
+        env.update(also)
+        got = subprocess.run([str(ADAPTER), option], capture_output=True, text=True,
+                             timeout=PATIENCE, env=env, check=False)
+        return got, json.loads(observed.read_text(encoding="utf-8"))
+
+    def test_default_status_preserves_the_existing_default_environment_and_command(self):
+        got, observed = self.called("--account-status", stdout="Logged in using ChatGPT",
+                                    CODEX_HOME="owners-value", OPENAI_API_KEY="owners-key")
+        self.assertEqual({"state": "authenticated"}, json.loads(got.stdout))
+        self.assertEqual(["login", "status"], observed["argv"])
+        self.assertEqual("owners-value", observed["CODEX_HOME"])
+        self.assertEqual("owners-key", observed["OPENAI_API_KEY"])
+
+    def test_an_alias_uses_its_home_file_store_and_no_ambient_authentication(self):
+        account_home = self.home / "provider-accounts" / "codex" / "work" / "home"
+        account_home.mkdir(parents=True)
+        got, observed = self.called(
+            "--account-status", stdout="Not logged in", code=1,
+            RUNDESK_PROVIDER_ALIAS="work", RUNDESK_PROVIDER_ACCOUNT_HOME=str(account_home),
+            CODEX_HOME="owners-value", OPENAI_API_KEY="owners-key",
+            CODEX_ACCESS_TOKEN="owners-token", CODEX_API_KEY="owners-codex-key",
+            OPENAI_FEDERATION_RULE_ID="owners-rule")
+        self.assertEqual({"state": "signed_out"}, json.loads(got.stdout))
+        self.assertEqual(["-c", 'cli_auth_credentials_store="file"', "login", "status"],
+                         observed["argv"])
+        self.assertEqual(str(account_home), observed["CODEX_HOME"])
+        self.assertIsNone(observed["OPENAI_API_KEY"])
+        self.assertIsNone(observed["CODEX_ACCESS_TOKEN"])
+        self.assertIsNone(observed["CODEX_API_KEY"])
+        self.assertIsNone(observed["OPENAI_FEDERATION_RULE_ID"])
+
+    def test_default_status_preserves_every_aws_bedrock_input_unaliased(self):
+        """The unaliased command line and environment stay byte-for-byte what they were before
+        Amazon Bedrock isolation existed — this only ever narrows an explicit alias."""
+        got, observed = self.called(
+            "--account-status", stdout="Logged in using Amazon Bedrock AWS access keys",
+            AWS_BEARER_TOKEN_BEDROCK="owners-bearer-token",
+            AWS_ACCESS_KEY_ID="owners-access-key", AWS_SECRET_ACCESS_KEY="owners-secret-key",
+            AWS_SESSION_TOKEN="owners-session-token", AWS_PROFILE="owners-profile",
+            AWS_WEB_IDENTITY_TOKEN_FILE="owners-token-file", AWS_ROLE_ARN="owners-role",
+            AWS_ROLE_SESSION_NAME="owners-session-name",
+            AWS_CONTAINER_CREDENTIALS_RELATIVE_URI="owners-relative-uri",
+            AWS_CONTAINER_CREDENTIALS_FULL_URI="owners-full-uri",
+            AWS_CONTAINER_AUTHORIZATION_TOKEN="owners-container-token",
+            AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE="owners-container-token-file",
+            AWS_SHARED_CREDENTIALS_FILE="owners-shared-credentials",
+            AWS_CONFIG_FILE="owners-aws-config",
+            AWS_EC2_METADATA_DISABLED="owners-setting")
+        self.assertEqual({"state": "authenticated"}, json.loads(got.stdout))
+        for name, value in (
+                ("AWS_BEARER_TOKEN_BEDROCK", "owners-bearer-token"),
+                ("AWS_ACCESS_KEY_ID", "owners-access-key"),
+                ("AWS_SECRET_ACCESS_KEY", "owners-secret-key"),
+                ("AWS_SESSION_TOKEN", "owners-session-token"),
+                ("AWS_PROFILE", "owners-profile"),
+                ("AWS_WEB_IDENTITY_TOKEN_FILE", "owners-token-file"),
+                ("AWS_ROLE_ARN", "owners-role"),
+                ("AWS_ROLE_SESSION_NAME", "owners-session-name"),
+                ("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "owners-relative-uri"),
+                ("AWS_CONTAINER_CREDENTIALS_FULL_URI", "owners-full-uri"),
+                ("AWS_CONTAINER_AUTHORIZATION_TOKEN", "owners-container-token"),
+                ("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "owners-container-token-file"),
+                ("AWS_SHARED_CREDENTIALS_FILE", "owners-shared-credentials"),
+                ("AWS_CONFIG_FILE", "owners-aws-config")):
+            with self.subTest(name=name):
+                self.assertEqual(value, observed[name])
+        self.assertEqual("owners-setting", observed["AWS_EC2_METADATA_DISABLED"])
+
+    def test_an_alias_fails_closed_on_every_amazon_bedrock_aws_sdk_input(self):
+        """Removing the named variables alone is not enough — the AWS SDK's own default chain
+        still checks a shared config/credentials file under `$HOME` and, last, the EC2 instance
+        metadata service. Both are rooted or disabled rather than merely unset."""
+        account_home = self.home / "provider-accounts" / "codex" / "work" / "home"
+        account_home.mkdir(parents=True)
+        got, observed = self.called(
+            "--account-status", stdout="Not logged in", code=1,
+            RUNDESK_PROVIDER_ALIAS="work", RUNDESK_PROVIDER_ACCOUNT_HOME=str(account_home),
+            AWS_BEARER_TOKEN_BEDROCK="owners-bearer-token",
+            AWS_ACCESS_KEY_ID="owners-access-key", AWS_SECRET_ACCESS_KEY="owners-secret-key",
+            AWS_SESSION_TOKEN="owners-session-token", AWS_PROFILE="owners-profile",
+            AWS_WEB_IDENTITY_TOKEN_FILE="owners-token-file", AWS_ROLE_ARN="owners-role",
+            AWS_ROLE_SESSION_NAME="owners-session-name",
+            AWS_CONTAINER_CREDENTIALS_RELATIVE_URI="owners-relative-uri",
+            AWS_CONTAINER_CREDENTIALS_FULL_URI="owners-full-uri",
+            AWS_CONTAINER_AUTHORIZATION_TOKEN="owners-container-token",
+            AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE="owners-container-token-file",
+            AWS_SHARED_CREDENTIALS_FILE="owners-shared-credentials",
+            AWS_CONFIG_FILE="owners-aws-config")
+        self.assertEqual({"state": "signed_out"}, json.loads(got.stdout))
+        for name in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                     "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_WEB_IDENTITY_TOKEN_FILE",
+                     "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME",
+                     "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                     "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+                     "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"):
+            with self.subTest(name=name):
+                self.assertIsNone(observed[name])
+        # Rooted inside the alias's own account home rather than merely unset, and the metadata
+        # service's own documented opt-out rather than a variable this adapter cannot close by
+        # removing.
+        self.assertTrue(observed["AWS_SHARED_CREDENTIALS_FILE"].startswith(str(account_home)))
+        self.assertTrue(observed["AWS_CONFIG_FILE"].startswith(str(account_home)))
+        self.assertNotEqual("owners-shared-credentials", observed["AWS_SHARED_CREDENTIALS_FILE"])
+        self.assertNotEqual("owners-aws-config", observed["AWS_CONFIG_FILE"])
+        self.assertEqual("true", observed["AWS_EC2_METADATA_DISABLED"])
+
+    def test_login_and_logout_use_codex_native_commands_at_the_same_alias_boundary(self):
+        account_home = self.home / "provider-accounts" / "codex" / "work" / "home"
+        account_home.mkdir(parents=True)
+        for option, command in (("--account-login", "login"), ("--account-logout", "logout")):
+            with self.subTest(option=option):
+                got, observed = self.called(
+                    option, RUNDESK_PROVIDER_ACCOUNT_HOME=str(account_home),
+                    OPENAI_API_KEY="owners-key")
+                self.assertEqual(0, got.returncode)
+                self.assertEqual(["-c", 'cli_auth_credentials_store="file"', command],
+                                 observed["argv"])
+                self.assertEqual(str(account_home), observed["CODEX_HOME"])
+                self.assertIsNone(observed["OPENAI_API_KEY"])
+
+    def test_interrupted_malformed_and_unexpected_statuses_are_not_authoritative(self):
+        fixtures = (("something new", 0, {}), ("Logged in using ChatGPT", 2, {}),
+                    ("", 0, {"FAKE_SIGNAL": "1"}))
+        for status, code, also in fixtures:
+            with self.subTest(status=status, code=code, also=also):
+                got, _observed = self.called("--account-status", stdout=status, code=code, **also)
+                self.assertEqual(1, got.returncode)
+                self.assertEqual({"state": "unable_to_check"}, json.loads(got.stdout))
+
+    def test_every_official_authenticated_form_is_recognized(self):
+        """Read out of `codex-rs/cli/src/login.rs::run_login_status` rather than assumed: six of
+        the seven `AuthMode` arms print one exact sentence, and the API-key arm prints a masked
+        key — `***` at thirteen characters or under, else an eight-character prefix, `***`, and a
+        five-character suffix, through `safe_format_key`."""
+        forms = ("Logged in using workload identity", "Logged in using ChatGPT",
+                 "Logged in using access token", "Logged in using personal access token",
+                 "Logged in using Amazon Bedrock API key",
+                 "Logged in using Amazon Bedrock AWS access keys",
+                 "Logged in using an API key - ***",
+                 "Logged in using an API key - sk-proj-***abcde")
+        for stdout in forms:
+            with self.subTest(stdout=stdout):
+                got, _observed = self.called("--account-status", stdout=stdout, code=0)
+                self.assertEqual({"state": "authenticated"}, json.loads(got.stdout))
+
+    def test_shared_prefix_text_that_is_not_an_official_form_is_not_authoritative(self):
+        """`"Logged in using "` starts every true sentence and would start a broken vendor build,
+        an arm this adapter does not know, or a deliberately spoofed stream just as easily — a
+        prefix match would read any of those as authenticated."""
+        forms = ("Logged in using something this adapter has never heard of",
+                 "Logged in using an API key - wrongshape",
+                 "Logged in using an API key - 1234567***12345",
+                 "Logged in")
+        for stdout in forms:
+            with self.subTest(stdout=stdout):
+                got, _observed = self.called("--account-status", stdout=stdout, code=0)
+                self.assertEqual({"state": "unable_to_check"}, json.loads(got.stdout))
+
+    def test_a_missing_codex_is_not_reported_as_an_account_state(self):
+        got = subprocess.run([str(ADAPTER), "--account-status"], capture_output=True, text=True,
+                             timeout=PATIENCE, env={"PATH": "/usr/bin:/bin"}, check=False)
+        self.assertEqual(1, got.returncode)
+        self.assertEqual({"state": "unable_to_check"}, json.loads(got.stdout))
 
 
 class OneCapturedTurn(support.Isolated):
@@ -207,6 +409,9 @@ class WhatItAsksTheBrainFor(support.Isolated):
 import json, os, sys
 if "--capabilities" in sys.argv[1:]:
     print('{"tools": true}'); raise SystemExit(0)
+with open(os.environ["HEARD"], "a") as writing:
+    writing.write(json.dumps({"argv": sys.argv[1:], "CODEX_HOME": os.environ.get("CODEX_HOME"),
+                              "has_OPENAI_API_KEY": "OPENAI_API_KEY" in os.environ}) + "\\n")
 for line in sys.stdin:
     with open(os.environ["HEARD"], "a") as writing:
         writing.write(line)
@@ -246,6 +451,25 @@ for line in sys.stdin:
     def test_it_says_who_it_is_and_never_pretends_to_be_somebody_else(self):
         self.spoken = self.spoke()
         self.assertEqual("rundesk", self.sent("initialize")[0]["params"]["clientInfo"]["name"])
+
+    def test_an_alias_is_the_home_and_file_store_used_by_the_turn(self):
+        account_home = self.home / "provider-accounts" / "codex" / "work" / "home"
+        account_home.mkdir(parents=True)
+        self.spoken = self.spoke(RUNDESK_PROVIDER_ALIAS="work",
+                                 RUNDESK_PROVIDER_ACCOUNT_HOME=str(account_home),
+                                 CODEX_HOME="owners-value", OPENAI_API_KEY="owners-key")
+        started = next(one for one in self.spoken if "argv" in one)
+        self.assertEqual(["-c", 'cli_auth_credentials_store="file"', "app-server", "--stdio"],
+                         started["argv"])
+        self.assertEqual(str(account_home), started["CODEX_HOME"])
+        self.assertFalse(started["has_OPENAI_API_KEY"])
+
+    def test_an_unaliased_turn_preserves_the_owners_codex_environment_and_command(self):
+        self.spoken = self.spoke(CODEX_HOME="owners-value", OPENAI_API_KEY="owners-key")
+        started = next(one for one in self.spoken if "argv" in one)
+        self.assertEqual(["app-server", "--stdio"], started["argv"])
+        self.assertEqual("owners-value", started["CODEX_HOME"])
+        self.assertTrue(started["has_OPENAI_API_KEY"])
 
     def test_the_owners_thread_list_shows_where_the_thread_came_from(self):
         self.spoken = self.spoke()

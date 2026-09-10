@@ -82,6 +82,12 @@ import uuid
 CLAUDE = "claude"
 STREAMING = ("-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose")
 
+#: Authentication inputs `claude auth status` accepts without looking in `CLAUDE_CONFIG_DIR`.
+#: Measured: an otherwise empty config directory with any one of these set reports `loggedIn: true`
+#: and `apiKeySource`/`authMethod` naming the variable. An explicit alias must not fall back to any
+#: of them or a missing alias login would silently become the ordinary account.
+AMBIENT_AUTH = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
 #: How long `claude --version` may take when `--capabilities` is asked. A local exec with no network
 #: in it; a machine where that takes longer has something else wrong.
 VERSION_WITHIN = 10.0
@@ -245,6 +251,9 @@ def the_environment() -> dict:
     **The ordinary account's environment is unchanged.** `CLAUDE_CONFIG_DIR` is set only when
     Rundesk explicitly supplies an additional account home. That isolation deliberately requires a
     separate provider-owned login; neither this adapter nor Rundesk reads or copies credentials.
+    An explicit alias also removes `AMBIENT_AUTH` — Claude accepts any of them without looking in
+    `CLAUDE_CONFIG_DIR` at all, so a missing alias login would otherwise silently become whichever
+    of them the ordinary account, or the machine, happened to have set.
     """
     env = os.environ.copy()
     with contextlib.suppress(Exception):
@@ -252,6 +261,8 @@ def the_environment() -> dict:
         env.setdefault("USER", getpass.getuser())
     account_home = os.environ.get("RUNDESK_PROVIDER_ACCOUNT_HOME")
     if account_home:
+        for name in AMBIENT_AUTH:
+            env.pop(name, None)
         env["CLAUDE_CONFIG_DIR"] = account_home
     return env
 

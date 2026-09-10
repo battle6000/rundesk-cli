@@ -40,8 +40,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from rundesk.agents import directory
-from rundesk.core import adapters
-from rundesk.providers import streaming
+from rundesk.core import adapters, secrets
+from rundesk.providers import environment, streaming
 from rundesk.utils import logs, programs
 
 #: Where the provider adapters that ship stand, under whatever `paths.code()` resolves to, and where
@@ -224,25 +224,71 @@ def capabilities(named: str, settings: Optional[str] = None,
                                   adapters.environment(told), running)
 
 
-def account_environment(alias: Optional[str], account_home: Optional[Path]) -> Dict[str, str]:
-    """The management boundary an adapter receives, absent in both parts for the default."""
+def account_environment(alias: Optional[str], account_home: Optional[Path],
+                        owners: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The management boundary an adapter receives, at the same owner-value boundary as a turn.
+
+    **A status, login, or logout check must see what a turn would see**, or it tells a different
+    truth than the turn that follows it: the ordinary account's `--account-status` would report
+    `unable_to_check` for a brain the owner authenticates through a value `environment.owners_own()`
+    hands every turn, such as an API key kept in Rundesk's own sealed store rather than this
+    process's environment. An explicit alias is handed the same owner values for the opposite
+    reason — the vendor adapter is the one that knows which of them are that brain's own ambient
+    authentication and removes them from *its* environment once `PROVIDER_ACCOUNT_HOME` says an
+    alias is in effect; a caller that withheld them first would leave nothing for that adapter-side
+    removal to prove.
+
+    `PROVIDER_ALIAS` and `PROVIDER_ACCOUNT_HOME` stay reserved exactly as `environment.for_turn`
+    reserves them for a turn — an owner value stored under either name may not make an unaliased
+    check look aliased, or the reverse.
+
+    `owners` is `environment.owners_own()`, already produced. A caller that must earn readiness
+    from the sealed store *before* invoking an adapter at all — see `_account_owners` — passes its
+    own read in rather than asking this function to read it again.
+    """
     told = {}
     if alias is not None:
         if account_home is None:
             raise NotRunnable(f"the alias {alias} has no registered account home")
         told[PROVIDER_ALIAS] = alias
         told[PROVIDER_ACCOUNT_HOME] = str(account_home)
-    return adapters.environment(told)
+    built = adapters.environment(told)
+    for name, value in sorted((owners if owners is not None else environment.owners_own()).items()):
+        if name not in built and name not in (PROVIDER_ALIAS, PROVIDER_ACCOUNT_HOME):
+            built[name] = value
+    return built
+
+
+def _account_owners() -> Optional[Dict[str, str]]:
+    """`environment.owners_own()`, with an unreadable sealed store answered as *nothing to
+    report* rather than raised.
+
+    **Read before any adapter is invoked, including `--capabilities`.** `owners_own()` raises
+    `secrets.Refused` when the store itself cannot be read — corrupted or unreadable, not merely a
+    value inside it that could not be. Left uncaught anywhere on the way to a turn's own
+    environment, that exception reaches a person running `rundesk providers status` as a traceback
+    instead of the same `unable_to_check` every other account-management failure here already
+    answers with; `commands.providers` does not know this module's storage layer and should not
+    have to. Asked first and passed through — see `account_environment` — so a store that cannot
+    be read never lets even the offline `--capabilities` question reach a program.
+    """
+    try:
+        return environment.owners_own()
+    except secrets.Refused:
+        return None
 
 
 def account_status(named: str, alias: Optional[str], account_home: Optional[Path],
                    running: Optional[Callable[..., programs.Ran]] = None) -> str:
     """One normalized provider-owned authentication state, with all other output discarded."""
+    owners = _account_owners()
+    if owners is None:
+        return "unable_to_check"
     if not capabilities(named).get("account_aliases"):
         raise NotRunnable(f"the {named} adapter does not support account aliases")
+    env = account_environment(alias, account_home, owners)
     ran = (running or programs.run)([str(where(named)), "--account-status"],
-                                    ACCOUNT_STATUS_WITHIN,
-                                    env=account_environment(alias, account_home))
+                                    ACCOUNT_STATUS_WITHIN, env=env)
     if ran.trouble or ran.code not in (0, 1):
         return "unable_to_check"
     said = adapters.printed_object(ran.out)
@@ -254,10 +300,13 @@ def account_login(named: str, alias: Optional[str], account_home: Optional[Path]
                   interacting: Optional[Callable[[List[str], Dict[str, str]], int]] = None,
                   checking: Optional[Callable[..., str]] = None) -> str:
     """Run official interactive login, then earn readiness with a fresh normalized status."""
+    owners = _account_owners()
+    if owners is None:
+        return "unable_to_check"
     if not capabilities(named).get("account_aliases"):
         raise NotRunnable(f"the {named} adapter does not support account aliases")
-    code = (interacting or _interact)([str(where(named)), "--account-login"],
-                                      account_environment(alias, account_home))
+    env = account_environment(alias, account_home, owners)
+    code = (interacting or _interact)([str(where(named)), "--account-login"], env)
     if code != 0:
         return "signed_out"
     return (checking or account_status)(named, alias, account_home)
@@ -267,10 +316,13 @@ def account_logout(named: str, alias: Optional[str], account_home: Optional[Path
                    interacting: Optional[Callable[[List[str], Dict[str, str]], int]] = None,
                    checking: Optional[Callable[..., str]] = None) -> str:
     """Run official logout for the exact boundary, then report only a fresh status."""
+    owners = _account_owners()
+    if owners is None:
+        return "unable_to_check"
     if not capabilities(named).get("account_aliases"):
         raise NotRunnable(f"the {named} adapter does not support account aliases")
-    code = (interacting or _interact)([str(where(named)), "--account-logout"],
-                                      account_environment(alias, account_home))
+    env = account_environment(alias, account_home, owners)
+    code = (interacting or _interact)([str(where(named)), "--account-logout"], env)
     if code != 0:
         return "unable_to_check"
     return (checking or account_status)(named, alias, account_home)
