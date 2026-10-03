@@ -238,6 +238,18 @@ list, so nothing in it is globbed, expanded, or read as `;`, `&&` or a redirecti
 rather than a bare `--` because argparse matches positionals in contiguous runs, and a flag between
 them makes the most natural spelling of `--` an `unrecognized arguments` error.
 
+**The shipped Discord adapter takes one option, `--with workflow-studio`**, and it is a bare word
+because `--with` is itself an option: argparse reads a value starting `--` as another one. It asks
+for the `/workflow` command, which starts a released workflow in the Workflow Studio (see
+[the Discord guide](../guides/discord.md#start-a-workflow-from-discord)). The adapter then needs
+three more values and names them with the token: `WORKFLOW_STUDIO_BASE_URL`,
+`WORKFLOW_STUDIO_ACCESS_CLIENT_ID` and `WORKFLOW_STUDIO_ACCESS_CLIENT_SECRET`, each kept under the
+agent's own name like the bot token. It records `{"workflow_studio": true}` as its `settings`, and
+declares the four names only when asked, because every name a channel declares is required: a Discord
+channel without the Studio keeps declaring the token alone. `channels test` and `channels doctor`
+pass no option, and recognise the channel by its values. A channel added before this has to be
+removed and added again to gain the command; there is no verb that changes what a channel declares.
+
 `--notify` makes this the channel adapter unprompted things go through. At most one channel per agent
 may be that. The shipped Discord adapter privately resolves every allowed user; the adapter-reported
 place remains the compatible destination for adapters that do not fan out.

@@ -148,6 +148,62 @@ rundesk channels configure ava discord --notify
 rundesk gateways restart ava
 ```
 
+## Start a workflow from Discord
+
+An agent's Discord bot can also start one released workflow in the Workflow Studio. It is optional,
+and a channel added without it has no such command.
+
+```text
+/workflow title:Daily Briefing
+```
+
+The bot does no reasoning here. It forwards your interaction to the Studio and relays the answer,
+privately, to you alone:
+
+| You see | Because |
+|---|---|
+| `Daily Briefing · rev 3` and a link | a run started, pinned to release 3; open the link to watch it |
+| `That workflow is already running — <link>` | the Studio already has a run of it going; nothing new started |
+| `That workflow can't be started from here.` | the Studio refused, and it says the same thing whatever the reason: you are not allowed, no workflow has that title, the title is ambiguous, or its latest release does not allow Discord |
+| `I couldn't confirm whether that workflow started…` | the Studio did not answer; the bot asked again twice with the same interaction, so it is safe to check the Studio or try again |
+| `Workflows can't be started right now.` | the Studio answered something a launch never answers, which is a setup problem for whoever runs the bot; the gateway log says which status |
+
+Typing in the `title` box suggests up to 25 titles you may start. If the Studio is slow or refuses,
+there are simply no suggestions. A title longer than 100 characters is never suggested; type it in
+full.
+
+### What you set up
+
+Two things sit outside Rundesk, with whoever runs the Studio: a Cloudflare Access **service token**
+allowed to reach the Studio, and your Discord user ID on the Studio's own allow list. The Studio
+decides who may start what. This bot's `--allow` list only avoids calling the Studio for people it
+can never answer, and the Studio checks again.
+
+Then give the channel three values. Add them when you connect the bot:
+
+```sh
+rundesk channels add ava discord --allow "$discord_user_id" --with workflow-studio
+```
+
+Rundesk asks, without echoing, for the bot token and then for:
+
+| Name (kept as `<name>__AVA`) | What it is |
+|---|---|
+| `WORKFLOW_STUDIO_BASE_URL` | the Studio's address, such as `https://studio.example.com`: nothing after the host, and `https` unless it is this machine |
+| `WORKFLOW_STUDIO_ACCESS_CLIENT_ID` | the service token's client ID |
+| `WORKFLOW_STUDIO_ACCESS_CLIENT_SECRET` | the service token's secret |
+
+A channel connected earlier needs `rundesk channels remove ava discord --confirm` first, and then
+the command above; its bot token stays where it is and is kept when you type nothing at that prompt.
+Restart the gateway and run `/workflow` to see it. Discord can take up to an hour to show a command
+it has not offered before.
+
+**These are kept like the bot token, and that is wider than it sounds.** Rundesk hands every
+ordinary stored value to an agent's turns
+([a provider is handed every ordinary value](../extending/providers.md)), so the agent's brain can
+read the service token, and so can anything it runs. Use a service token made for this bot alone,
+and give it only what the Studio's Discord launch needs.
+
 ## What it can search
 
 `rundesk search` lets the agent look through the servers this bot is in, mid-turn, and ask again once

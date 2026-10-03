@@ -18,17 +18,22 @@ import asyncio
 import contextlib
 import datetime
 import hashlib
+import http.client
 import importlib.machinery
 import importlib.util
+import inspect
 import io
 import json
 import os
 import re
 import shutil
+import socket
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional
 from unittest import mock
@@ -117,12 +122,51 @@ class Status:
 
 
 class Command:
-    """One registered slash command, holding what it was named and what it runs."""
+    """One registered slash command, holding what it was named and what it runs.
+
+    **Strict where the library is strict**, because a stand-in that accepted anything would prove
+    nothing about a command the real one refuses at registration: a description for an argument the
+    callback does not have, and an autocomplete callback that is not a two-argument coroutine
+    function or that is defined inside a class (discord.py then wants a third, bound, argument).
+    """
 
     def __init__(self, *, name: str, description: str, callback: Any, nsfw: bool = False) -> None:
         self.name = name
         self.description = description
         self.callback = callback
+        self.autocompletes: Dict[str, Any] = {}
+        arguments = list(inspect.signature(callback).parameters)[1:]
+        for described in getattr(callback, "described", {}):
+            if described not in arguments:
+                raise TypeError(f"{described!r} is described and is not an argument of {name}")
+        self.arguments = arguments
+
+    def autocomplete(self, name: str):
+        def decorator(coro: Any) -> Any:
+            if not inspect.iscoroutinefunction(coro):
+                raise TypeError("The autocomplete callback must be a coroutine function.")
+            if name not in self.arguments:
+                raise TypeError(f"unknown parameter: {name!r}")
+            if name in self.autocompletes:
+                raise TypeError(f"parameter {name!r} already has an autocomplete callback")
+            inside_a_class = (coro.__qualname__ != coro.__name__
+                              and not coro.__qualname__.rpartition(".")[0].endswith("<locals>"))
+            if len(inspect.signature(coro).parameters) != 2 + inside_a_class:
+                raise TypeError(f"autocomplete callback {coro.__qualname__!r} requires either 2 "
+                                f"or 3 parameters to be passed")
+            self.autocompletes[name] = coro
+            return coro
+        return decorator
+
+
+class Choice:
+    """One suggestion for an argument: what is shown, and what is sent back if it is picked."""
+
+    def __init__(self, *, name: str, value: str) -> None:
+        if not 1 <= len(name) <= 100 or not 1 <= len(value) <= 100:
+            raise ValueError("Discord takes between one and a hundred characters in a choice")
+        self.name = name
+        self.value = value
 
 
 class CommandTree:
@@ -150,11 +194,13 @@ class AppCommands:
 
     Command = Command
     CommandTree = CommandTree
+    Choice = Choice
 
     @staticmethod
-    def describe(**_named: str):
+    def describe(**named: str):
         """Names an argument for the menu. It changes nothing about the function it wraps."""
         def keeping(one: Any) -> Any:
+            one.described = named
             return one
         return keeping
 
@@ -602,7 +648,7 @@ class Records(unittest.TestCase):
         self.client.users[self.asker.id] = self.asker
         self.reaching: Any = None
 
-    def during(self, doing) -> List[Dict[str, Any]]:
+    def during(self, doing, **built: Any) -> List[Dict[str, Any]]:
         """Run one whole exchange inside a loop, and hand back the records it put on stdout.
 
         **The connection is built in here rather than in `setUp`.** It holds an `asyncio.Event`,
@@ -613,7 +659,7 @@ class Records(unittest.TestCase):
         caught = io.StringIO()
 
         async def whole() -> None:
-            self.reaching = adapter.Reaching([str(self.asker.id)])
+            self.reaching = adapter.Reaching([str(self.asker.id)], **built)
             self.reaching.client = self.client
             await doing(self.reaching)
 
@@ -3534,6 +3580,821 @@ class WhereAThreadedReportStands(Records):
         self.threading(reply_to=None)
         self.assertEqual([], self.client.places[4242].threaded)
         self.assertEqual(1, len(self.client.places[4242].sent))
+
+
+# ---------------------------------------------------------------------------------------------
+# `/workflow`: the one gesture another service answers.
+# ---------------------------------------------------------------------------------------------
+
+class Checking:
+    """A client that signs in and finds one person, for the cases that run `--check` to its end.
+
+    The fuller stand-in above is built for `serve`, `search` and `fetch`; `--check` needs only this:
+    a login that works, one user fetched, an application whose flags say the toggle is on, and a
+    record of every client made so that a refusal can be shown to have come before any of them.
+    """
+
+    made: ClassVar[List["Checking"]] = []
+
+    def __init__(self, *, intents: Any = None) -> None:
+        self.user = "rundesk#4471"
+        self.application_id = 4471
+        self.application_flags = type("Flags", (), {"gateway_message_content": True})()
+        Checking.made.append(self)
+
+    async def login(self, _token: str) -> None:
+        return None
+
+    async def fetch_user(self, which: int) -> Person:
+        return Person(which)
+
+    async def close(self) -> None:
+        return None
+
+
+#: A made-up service token's secret, and the one value no record, reply, log line or `repr` may
+#: ever hold. Synthetic — it is not, and never was, anybody's credential.
+THE_SECRET = "synthetic-access-secret-0f3a9c"
+THE_URL = "https://studio.example.test/?wf=wf-daily&run=run_01"
+THE_STUDIO = adapter.Studio("https://studio.example.test", "synthetic-id.access", THE_SECRET)
+
+
+def launched(version: Any = 3, title: str = "Daily Briefing") -> "adapter.Said":
+    """What the Studio answers a launch with, 201 or 200: the same body either way."""
+    return adapter.Said(201, {"title": title, "version": version, "runId": "run_01", "url": THE_URL})
+
+
+def refused(code: str = "refused", status: int = 403) -> "adapter.Said":
+    return adapter.Said(status, {"error": {"code": code, "message": "SENTINEL-BODY-TEXT"}})
+
+
+class TheStudio:
+    """The Studio as the adapter reaches it: scripted answers, and every call written down.
+
+    **Each call is recorded with the thread it ran on**, which is how a case proves a slow Studio
+    was never waited for on the event loop. The last answer stands for every further call, and an
+    exception in the script is raised as the transport would raise it.
+    """
+
+    def __init__(self, *answers: Any) -> None:
+        self.answers = list(answers)
+        self.calls: List[Dict[str, Any]] = []
+        self.watching: Any = None
+
+    def __call__(self, studio: Any, method: str, path: str, within: float,
+                 query: Optional[Dict[str, str]] = None,
+                 body: Optional[Dict[str, str]] = None) -> Any:
+        self.calls.append({"studio": studio, "method": method, "path": path, "within": within,
+                           "query": dict(query) if query else None,
+                           "body": dict(body) if body else None,
+                           "thread": threading.get_ident(),
+                           "deferred": None if self.watching is None else self.watching.deferred})
+        one = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(one, Exception):
+            raise one
+        if callable(one):
+            return one()
+        return one
+
+
+class HowAWorkflowIsStarted(Records):
+    """`/workflow title:"…"` — held open, forwarded, and answered with what the Studio said.
+
+    The adapter decides nothing here. Every case that follows is a status the contract defines and
+    the exact sentence it becomes, or a way the call could fail and what a person is told of it.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.napped: List[float] = []
+
+    async def nap(self, seconds: float) -> None:
+        self.napped.append(seconds)
+
+    def typed(self, studio: "TheStudio", title: str = "Daily Briefing", who: int = 22):
+        """One `/workflow` pressed: its interaction, and the records the adapter wrote."""
+        interaction = Interaction("workflow", Person(who), place=700)
+        studio.watching = interaction
+        self.interaction = interaction
+
+        async def exchange(reaching: Any) -> None:
+            await reaching._the_workflow()(interaction, title)
+
+        self.records = self.during(exchange, studio=THE_STUDIO, transport=studio, pause=self.nap)
+        return interaction
+
+    def said(self, studio: "TheStudio", **typed: Any) -> List[str]:
+        """What a person was shown, in order, and every piece of it private."""
+        interaction = self.typed(studio, **typed)
+        self.assertTrue(all(one["ephemeral"] for one in interaction.followed + interaction.answered))
+        return [one["text"] for one in interaction.followed + interaction.answered]
+
+    # -- it is offered, and only to a channel that has a Studio ------------------------------
+
+    def test_it_is_offered_with_a_studio_and_its_title_is_suggested(self) -> None:
+        async def exchange(reaching: Any) -> None:
+            reaching.tree = adapter.discord.app_commands.CommandTree(self.client)
+            reaching._offers()
+            named = [one.name for one in reaching.tree.commands]
+            self.assertEqual(12, len(named))
+            self.assertEqual(1, named.count("workflow"))
+            found = next(one for one in reaching.tree.commands if one.name == "workflow")
+            self.assertEqual(["title"], found.arguments)
+            self.assertIn("title", found.autocompletes)
+            self.assertTrue(found.description.strip())
+            self.assertLessEqual(len(found.description), 100)
+
+        self.during(exchange, studio=THE_STUDIO)
+
+    def test_it_is_not_offered_by_a_channel_that_has_no_studio(self) -> None:
+        # A command that can only ever refuse is worse than none, and eleven is what every channel
+        # added before this had.
+        async def exchange(reaching: Any) -> None:
+            reaching.tree = adapter.discord.app_commands.CommandTree(self.client)
+            reaching._offers()
+            self.assertNotIn("workflow", [one.name for one in reaching.tree.commands])
+            self.assertEqual(11, len(reaching.tree.commands))
+
+        self.during(exchange)
+
+    def test_it_never_reaches_rundesk_so_nothing_there_has_to_know_the_word(self) -> None:
+        # The gateway's closed vocabulary is for what rundesk answers. This is answered by the
+        # Studio, so a record naming it would be one rundesk drops — and the suite above proves
+        # the vocabulary and the commands that use it are one list.
+        studio = TheStudio(launched())
+        self.typed(studio)
+        self.assertEqual([], [one for one in self.records
+                              if one.get("say") in ("control", "query", "configure")])
+        spoken = {one[2] for one in adapter.CONTROLS} | {one[2] for one in adapter.QUERIES}
+        self.assertNotIn(adapter.WORKFLOW[0], spoken)
+
+    # -- the interaction is held open first ---------------------------------------------------
+
+    def test_discord_is_answered_before_the_studio_is_asked(self) -> None:
+        studio = TheStudio(launched())
+        interaction = self.typed(studio)
+        self.assertIs(interaction.deferred, True)
+        self.assertEqual([True], [one["deferred"] for one in studio.calls],
+                         "the Studio was called before Discord's three seconds were answered")
+
+    # -- what is sent -------------------------------------------------------------------------
+
+    def test_only_the_interaction_the_user_and_the_title_are_sent(self) -> None:
+        studio = TheStudio(launched())
+        interaction = self.typed(studio, title="Daily Briefing")
+        (call,) = studio.calls
+        self.assertEqual("POST", call["method"])
+        self.assertEqual(adapter.LAUNCH_PATH, call["path"])
+        self.assertEqual({"interactionId": str(interaction.id), "discordUserId": "22",
+                          "title": "Daily Briefing"}, call["body"])
+        self.assertIsNone(call["query"])
+        self.assertIs(call["studio"], THE_STUDIO)
+        self.assertLessEqual(call["within"], adapter.LAUNCH_WITHIN)
+
+    def test_the_title_goes_exactly_as_it_was_typed(self) -> None:
+        # Matched there, exactly, ignoring case and surrounding spaces. Tidying it here would be a
+        # second reading of what a title is.
+        studio = TheStudio(launched())
+        self.typed(studio, title="  daily BRIEFING ")
+        self.assertEqual("  daily BRIEFING ", studio.calls[0]["body"]["title"])
+
+    def test_a_title_the_studio_could_never_accept_is_not_sent_to_be_refused(self) -> None:
+        for title in ("", "   ", "x" * (adapter.A_TITLE_MOST + 1)):
+            studio = TheStudio(launched())
+            self.assertEqual([adapter.CANNOT_START], self.said(studio, title=title), repr(title))
+            self.assertEqual([], studio.calls)
+
+    # -- what each status becomes -------------------------------------------------------------
+
+    def test_a_started_run_says_its_title_its_release_and_where_to_watch_it(self) -> None:
+        for how in (201, 200):
+            first = launched()
+            shown = self.said(TheStudio(adapter.Said(how, first.body)))
+            self.assertEqual([f"Daily Briefing · rev 3\n{THE_URL}"], shown, how)
+
+    def test_a_release_that_is_not_a_number_is_still_said(self) -> None:
+        self.assertEqual([f"Daily Briefing · rev 3b\n{THE_URL}"],
+                         self.said(TheStudio(launched(version="3b"))))
+
+    def test_a_refusal_is_the_one_sentence_the_contract_gives(self) -> None:
+        self.assertEqual("That workflow can't be started from here.", adapter.CANNOT_START)
+        self.assertEqual(["That workflow can't be started from here."],
+                         self.said(TheStudio(refused())))
+
+    def test_a_workflow_already_running_says_so_and_where(self) -> None:
+        running = adapter.Said(409, {"error": {"code": "conflict",
+                                               "message": "That workflow is already running",
+                                               "details": {"title": "Daily Briefing", "version": 3,
+                                                           "runId": "run_00", "url": THE_URL}}})
+        self.assertEqual([f"That workflow is already running — {THE_URL}"],
+                         self.said(TheStudio(running)))
+
+    def test_a_conflict_with_no_link_still_says_it_is_running(self) -> None:
+        bare = adapter.Said(409, {"error": {"code": "conflict"}})
+        self.assertEqual(["That workflow is already running"], self.said(TheStudio(bare)))
+
+    def test_what_is_not_a_launch_answer_is_not_now_and_is_never_asked_again(self) -> None:
+        # A bad request, a token the Studio does not know, an Access edge in the way, a service
+        # that is not the right kind of caller (`forbidden` is a 403 that is *not* the refusal),
+        # a redirect to a login page. Each is somebody's setup to fix, and none is a run.
+        for status, code in ((400, "bad_request"), (401, ""), (403, "forbidden"), (404, ""),
+                             (302, ""), (429, "")):
+            studio = TheStudio(adapter.Said(status, {"error": {"code": code}} if code else None))
+            self.assertEqual([adapter.NOT_NOW], self.said(studio), status)
+            self.assertEqual(1, len(studio.calls), f"{status} was asked again")
+            self.assertEqual([], self.napped)
+
+    def test_a_forbidden_403_is_not_taken_for_the_refusal(self) -> None:
+        # The refusal names nothing about who or what. This one names the adapter's own setup, and
+        # showing it as the refusal would send an owner looking for an allow-list entry.
+        self.assertNotEqual(adapter.CANNOT_START, self.said(TheStudio(refused("forbidden")))[0])
+
+    def test_a_success_it_cannot_read_is_not_a_success_it_invents(self) -> None:
+        # The run may well exist, so what is said is that this could not tell — not a title and a
+        # link made up from what was typed.
+        for broken in (adapter.Said(201, None), adapter.Said(201, {"title": "Daily Briefing"}),
+                       adapter.Said(201, {"title": "", "version": 3, "url": THE_URL}),
+                       adapter.Said(200, {"title": "x", "version": True, "url": THE_URL}),
+                       adapter.Said(200, ["not", "an", "object"])):
+            self.assertEqual([adapter.UNCONFIRMED], self.said(TheStudio(broken)), broken)
+
+    # -- a call that may or may not have made a run -------------------------------------------
+
+    def test_a_retry_is_the_same_interaction_the_same_user_and_the_same_title(self) -> None:
+        studio = TheStudio(adapter.Unreachable("TimeoutError"), adapter.Said(502, None), launched())
+        interaction = self.typed(studio)
+        self.assertEqual(3, len(studio.calls))
+        self.assertEqual(1, len({json.dumps(one["body"], sort_keys=True) for one in studio.calls}))
+        self.assertEqual(str(interaction.id), studio.calls[2]["body"]["interactionId"])
+        self.assertEqual([f"Daily Briefing · rev 3\n{THE_URL}"],
+                         [one["text"] for one in interaction.followed])
+
+    def test_it_waits_a_little_before_each_retry_and_never_before_the_first_call(self) -> None:
+        studio = TheStudio(adapter.Said(503, None), adapter.Said(503, None), launched())
+        self.typed(studio)
+        self.assertEqual(list(adapter.LAUNCH_BACKOFF), self.napped)
+        self.assertEqual(2, len(adapter.LAUNCH_BACKOFF))
+        self.assertTrue(all(0 < one <= 5 for one in self.napped), "a short backoff")
+
+    def test_two_retries_and_then_it_says_it_could_not_confirm(self) -> None:
+        for gone in (adapter.Said(500, {"error": {"code": "internal"}}), adapter.Said(503, None),
+                     adapter.Unreachable("ConnectionRefusedError")):
+            studio = TheStudio(gone)
+            self.napped = []
+            shown = self.said(studio)
+            self.assertEqual(3, len(studio.calls), "one try and two more, and no more than that")
+            self.assertEqual([adapter.UNCONFIRMED], shown)
+            self.assertIn("couldn't confirm", shown[0])
+            self.assertNotIn("failed", shown[0], "it may well have started")
+            self.assertEqual(list(adapter.LAUNCH_BACKOFF), self.napped)
+
+    def test_a_refusal_is_final_and_is_not_asked_for_again(self) -> None:
+        studio = TheStudio(refused(), launched())
+        self.said(studio)
+        self.assertEqual(1, len(studio.calls))
+
+    def test_a_call_that_breaks_in_an_unforeseen_way_still_answers(self) -> None:
+        # A person who typed a command and was never answered would watch a spinner for fifteen
+        # minutes. Nothing may leave that open.
+        studio = TheStudio(RuntimeError("a bug in a transport"))
+        self.assertEqual([adapter.UNCONFIRMED], self.said(studio))
+
+    # -- the studio is never waited for on the loop -------------------------------------------
+
+    def test_a_slow_studio_does_not_hold_the_event_loop(self) -> None:
+        # The loop is what reads rundesk's stdin and serves every other interaction, so a call made
+        # on it would stall every conversation this channel carries.
+        release = threading.Event()
+        studio = TheStudio(lambda: (release.wait(10), launched())[1])
+        main = threading.get_ident()
+        ticks: List[int] = []
+
+        async def exchange(reaching: Any) -> None:
+            interaction = Interaction("workflow", Person(22), place=700)
+            studio.watching = interaction
+            slow = asyncio.ensure_future(reaching._the_workflow()(interaction, "Daily Briefing"))
+            other = Interaction("status", Person(22), place=700)
+            await reaching._a_query("status")(other)
+            for _ in range(20):
+                await asyncio.sleep(0.005)
+                ticks.append(1)
+            self.assertFalse(slow.done(), "the call was not in flight while the loop was serving")
+            self.assertTrue(other.deferred, "another command was not served while it waited")
+            self.assertEqual([], interaction.followed, "answered before the Studio had")
+            release.set()
+            await slow
+            self.assertEqual(1, len(interaction.followed))
+
+        self.during(exchange, studio=THE_STUDIO, transport=studio, pause=self.nap)
+        self.assertEqual(20, len(ticks))
+        self.assertNotEqual(main, studio.calls[0]["thread"], "the call ran on the loop's own thread")
+
+    def test_a_call_still_running_when_the_loop_ends_does_not_hold_the_process(self) -> None:
+        # The thread is a daemon, so a hung socket is left behind rather than joined at exit.
+        release = threading.Event()
+        self.addCleanup(release.set)
+        studio = TheStudio(lambda: (release.wait(10), launched())[1])
+        seen: List[Any] = []
+
+        async def exchange(reaching: Any) -> None:
+            waiting = asyncio.ensure_future(adapter.off_the_loop(lambda: studio(None, "GET", "/", 1)))
+            await asyncio.sleep(0.02)
+            seen.extend(t for t in threading.enumerate() if t.name == "studio")
+            waiting.cancel()
+
+        self.during(exchange)
+        self.assertEqual(1, len(seen))
+        self.assertTrue(seen[0].daemon)
+
+    # -- who may ask --------------------------------------------------------------------------
+
+    def test_a_stranger_is_told_what_the_studio_would_tell_them_and_nothing_is_called(self) -> None:
+        studio = TheStudio(launched())
+        interaction = self.typed(studio, who=9999)
+        self.assertEqual([], studio.calls, "a stranger caused a call to the Studio")
+        self.assertEqual([], [one for one in self.records if one.get("say") != "note"])
+        self.assertFalse(interaction.deferred)
+        self.assertEqual([adapter.CANNOT_START], [one["text"] for one in interaction.answered])
+        self.assertTrue(interaction.answered[0]["ephemeral"])
+        self.assertEqual([], interaction.followed)
+
+    def test_somebody_the_studio_refuses_is_told_exactly_what_a_stranger_is(self) -> None:
+        # Indistinguishable by design: neither learns which side said no, or that a title exists.
+        stranger = self.typed(TheStudio(launched()), who=9999).answered[0]["text"]
+        refused_there = self.said(TheStudio(refused()))[0]
+        self.assertEqual(stranger, refused_there)
+
+    def test_this_channels_list_is_not_a_second_source_of_truth(self) -> None:
+        # Somebody it allows is still the Studio's to refuse, and is shown the Studio's answer.
+        self.assertEqual([adapter.CANNOT_START], self.said(TheStudio(refused())))
+
+    # -- what is never written down -----------------------------------------------------------
+
+    def test_the_secret_is_never_in_what_is_said_or_logged_or_shown(self) -> None:
+        things = [
+            (TheStudio(launched()), "started"),
+            (TheStudio(refused()), "refused"),
+            (TheStudio(refused("forbidden")), "forbidden"),
+            (TheStudio(adapter.Said(403, {"error": {"message": THE_SECRET}})), "echoed"),
+            (TheStudio(adapter.Said(500, {"error": {"message": THE_SECRET}})), "down"),
+            (TheStudio(adapter.Unreachable("ConnectionResetError")), "unreachable"),
+        ]
+        for studio, how in things:
+            interaction = self.typed(studio)
+            everything = json.dumps([self.records, interaction.followed, interaction.answered])
+            self.assertNotIn(THE_SECRET, everything, how)
+        self.assertNotIn(THE_SECRET, repr(THE_STUDIO))
+        self.assertNotIn(THE_SECRET, str(THE_STUDIO))
+
+    def test_what_the_studio_wrote_is_never_in_a_log_line(self) -> None:
+        studio = TheStudio(adapter.Said(500, {"error": {"message": "SENTINEL-BODY-TEXT"}}))
+        self.typed(studio)
+        self.assertNotIn("SENTINEL-BODY-TEXT", json.dumps(self.records))
+        studio = TheStudio(adapter.Said(403, {"error": {"code": "forbidden",
+                                                         "message": "SENTINEL-BODY-TEXT"}}))
+        self.typed(studio)
+        notes = self.noted(self.records)
+        self.assertTrue(any("403" in one for one in notes), "an owner is told which status")
+        self.assertNotIn("SENTINEL-BODY-TEXT", json.dumps(self.records))
+
+    def test_the_studios_own_words_are_never_relayed(self) -> None:
+        # Only `title`, `version` and `url` are taken from a success, and nothing at all from a
+        # failure: a message the Studio wrote is a sentence this adapter did not choose.
+        studio = TheStudio(adapter.Said(403, {"error": {"code": "refused",
+                                                          "message": "SENTINEL-BODY-TEXT"}}))
+        self.assertNotIn("SENTINEL-BODY-TEXT", "".join(self.said(studio)))
+
+    def test_a_reply_that_is_long_is_still_whole(self) -> None:
+        # The answer goes back through the path every other private answer does.
+        long = "T" * 150
+        said = self.said(TheStudio(launched(title=long)))
+        self.assertEqual(f"{long} · rev 3\n{THE_URL}", "".join(said))
+
+
+class WhatATitleIsSuggested(Records):
+    """Autocomplete answers inside three seconds or answers nothing, and never raises."""
+
+    def asked(self, studio: "TheStudio", current: str = "dai", who: int = 22,
+              within: Optional[float] = None) -> List[Any]:
+        found: List[Any] = []
+        interaction = Interaction("workflow", Person(who), place=700)
+
+        async def exchange(reaching: Any) -> None:
+            reaching.tree = adapter.discord.app_commands.CommandTree(self.client)
+            reaching._offers()
+            command = next(one for one in reaching.tree.commands if one.name == "workflow")
+            found.extend(await command.autocompletes["title"](interaction, current))
+
+        if within is None:
+            self.during(exchange, studio=THE_STUDIO, transport=studio)
+        else:
+            with mock.patch.object(adapter, "TITLES_WITHIN", within):
+                self.during(exchange, studio=THE_STUDIO, transport=studio)
+        return found
+
+    @staticmethod
+    def titles(*named: str) -> "adapter.Said":
+        return adapter.Said(200, [{"title": one} for one in named])
+
+    def test_the_studios_titles_are_offered_as_they_are(self) -> None:
+        studio = TheStudio(self.titles("Daily Briefing", "Owner's Report"))
+        chosen = self.asked(studio)
+        self.assertEqual(["Daily Briefing", "Owner's Report"], [one.name for one in chosen])
+        self.assertEqual([one.name for one in chosen], [one.value for one in chosen])
+
+    def test_only_the_user_and_what_was_typed_are_sent(self) -> None:
+        studio = TheStudio(self.titles("Daily Briefing"))
+        self.asked(studio, current="dai")
+        (call,) = studio.calls
+        self.assertEqual("GET", call["method"])
+        self.assertEqual(adapter.TITLES_PATH, call["path"])
+        self.assertEqual({"userId": "22", "q": "dai"}, call["query"])
+        self.assertIsNone(call["body"])
+        self.assertEqual(2.0, call["within"], "the Studio gets two seconds")
+
+    def test_nothing_typed_yet_sends_no_filter(self) -> None:
+        studio = TheStudio(self.titles("Daily Briefing"))
+        self.asked(studio, current="")
+        self.assertEqual({"userId": "22"}, studio.calls[0]["query"])
+
+    def test_a_filter_longer_than_the_studio_reads_is_cut_to_what_it_reads(self) -> None:
+        studio = TheStudio(self.titles("x"))
+        self.asked(studio, current="q" * 500)
+        self.assertEqual(adapter.A_TITLE_MOST, len(studio.calls[0]["query"]["q"]))
+
+    def test_at_most_twenty_five_are_offered_even_if_more_come_back(self) -> None:
+        studio = TheStudio(self.titles(*[f"Workflow {number:02d}" for number in range(60)]))
+        chosen = self.asked(studio)
+        self.assertEqual(25, len(chosen))
+        self.assertEqual("Workflow 00", chosen[0].name)
+
+    def test_a_title_is_offered_once_and_only_if_it_fits_a_choice(self) -> None:
+        # Discord takes a hundred characters in a choice and a shortened title would not match the
+        # workflow, so one too long is typed rather than offered — and is never offered cut.
+        studio = TheStudio(self.titles("Same", "Same", "L" * 101, "Fits", "L" * 100))
+        self.assertEqual(["Same", "Fits", "L" * 100], [one.name for one in self.asked(studio)])
+
+    def test_nothing_unexpected_becomes_a_suggestion(self) -> None:
+        for odd in (adapter.Said(200, None), adapter.Said(200, {"title": "x"}),
+                    adapter.Said(200, ["x", 3, None, {"title": 4}, {"name": "y"}, {"title": ""}]),
+                    adapter.Said(403, [{"title": "Daily Briefing"}]),
+                    adapter.Said(500, [{"title": "Daily Briefing"}])):
+            self.assertEqual([], self.asked(TheStudio(odd)), odd)
+
+    def test_no_suggestions_on_any_failure(self) -> None:
+        for gone in (adapter.Unreachable("TimeoutError"), RuntimeError("a bug")):
+            self.assertEqual([], self.asked(TheStudio(gone)), gone)
+
+    def test_no_suggestions_when_the_studio_is_too_slow(self) -> None:
+        # Discord drops an answer that arrives after three seconds, so a slow Studio costs the
+        # suggestions and nothing else — and the call is not waited for.
+        release = threading.Event()
+        self.addCleanup(release.set)
+        studio = TheStudio(lambda: (release.wait(10), self.titles("Daily Briefing"))[1])
+        began = time.monotonic()
+        self.assertEqual([], self.asked(studio, within=0.05))
+        self.assertLess(time.monotonic() - began, 3.0)
+
+    def test_a_stranger_is_offered_nothing_and_nothing_is_asked(self) -> None:
+        studio = TheStudio(self.titles("Daily Briefing"))
+        self.assertEqual([], self.asked(studio, who=9999))
+        self.assertEqual([], studio.calls)
+
+    def test_the_slow_call_is_not_on_the_loops_thread(self) -> None:
+        studio = TheStudio(self.titles("Daily Briefing"))
+        self.asked(studio)
+        self.assertNotEqual(threading.get_ident(), studio.calls[0]["thread"])
+
+
+class HowTheStudioIsReached(unittest.TestCase):
+    """The one call this adapter makes over the network, with the network closed.
+
+    `urllib`'s opener is replaced by one that records the request and answers as scripted, so what
+    is checked is exactly what would have been sent and how every way of answering is read.
+    """
+
+    class Opener:
+        def __init__(self, answer: Any) -> None:
+            self.answer = answer
+            self.requests: List[Any] = []
+            self.timeouts: List[float] = []
+
+        def open(self, request: Any, timeout: Optional[float] = None) -> Any:
+            self.requests.append(request)
+            self.timeouts.append(timeout)
+            if isinstance(self.answer, BaseException):
+                raise self.answer
+            return self.answer
+
+    class Response:
+        def __init__(self, status: int, body: bytes) -> None:
+            self.status = status
+            self.body = body
+
+        def read(self, most: int = -1) -> bytes:
+            return self.body[:most] if most >= 0 else self.body
+
+        def __enter__(self) -> "HowTheStudioIsReached.Response":
+            return self
+
+        def __exit__(self, *_why: Any) -> bool:
+            return False
+
+    def reach(self, answer: Any, **asked: Any) -> Any:
+        opener = self.Opener(answer)
+        asked.setdefault("method", "POST")
+        asked.setdefault("path", adapter.LAUNCH_PATH)
+        asked.setdefault("within", 7.0)
+        with mock.patch.object(adapter.urllib.request, "build_opener", lambda *_given: opener):
+            try:
+                self.said = adapter.studio_asks(THE_STUDIO, **asked)
+            except adapter.Unreachable as why:
+                self.said = why
+        self.opener = opener
+        return self.said
+
+    def test_the_request_carries_the_two_access_headers_and_a_json_body(self) -> None:
+        self.reach(self.Response(201, b'{"title": "T"}'), body={"interactionId": "1"})
+        (request,) = self.opener.requests
+        sent = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual("synthetic-id.access", sent["cf-access-client-id"])
+        self.assertEqual(THE_SECRET, sent["cf-access-client-secret"])
+        self.assertEqual("application/json", sent["content-type"])
+        self.assertNotIn("python-urllib", sent.get("user-agent", "").lower())
+        self.assertEqual("POST", request.get_method())
+        self.assertEqual("https://studio.example.test/api/discord/launch", request.full_url)
+        self.assertEqual({"interactionId": "1"}, json.loads(request.data))
+        self.assertEqual([7.0], self.opener.timeouts)
+
+    def test_a_get_has_its_query_in_the_address_and_no_body(self) -> None:
+        self.reach(self.Response(200, b"[]"), method="GET", path=adapter.TITLES_PATH,
+                   query={"userId": "22", "q": "a b&c"})
+        (request,) = self.opener.requests
+        self.assertEqual("GET", request.get_method())
+        self.assertIsNone(request.data)
+        self.assertEqual("https://studio.example.test/api/discord/workflows?userId=22&q=a+b%26c",
+                         request.full_url)
+        sent = {key.lower() for key, _value in request.header_items()}
+        self.assertNotIn("content-type", sent)
+
+    def test_the_secret_is_never_in_the_address(self) -> None:
+        self.reach(self.Response(200, b"[]"), method="GET", path=adapter.TITLES_PATH,
+                   query={"userId": "22"})
+        self.assertNotIn(THE_SECRET, self.opener.requests[0].full_url)
+
+    def test_an_answer_is_its_status_and_its_json(self) -> None:
+        self.assertEqual(adapter.Said(201, {"a": 1}), self.reach(self.Response(201, b'{"a": 1}')))
+
+    def test_an_error_status_is_an_answer_and_is_read_like_one(self) -> None:
+        failing = urllib.error.HTTPError("https://studio.example.test/x", 409, "Conflict", {},
+                                         io.BytesIO(b'{"error": {"code": "conflict"}}'))
+        self.assertEqual(adapter.Said(409, {"error": {"code": "conflict"}}), self.reach(failing))
+
+    def test_a_body_that_is_not_json_is_none_and_not_an_error(self) -> None:
+        self.assertEqual(adapter.Said(502, None), self.reach(self.Response(502, b"<html>bad</html>")))
+        self.assertEqual(adapter.Said(200, None), self.reach(self.Response(200, b"\xff\xfe")))
+
+    def test_a_body_past_the_bound_is_not_parsed(self) -> None:
+        big = b'["' + b"x" * (adapter.STUDIO_BODY_MOST + 10) + b'"]'
+        self.assertEqual(adapter.Said(200, None), self.reach(self.Response(200, big)))
+
+    def test_anything_that_is_not_an_answer_is_unreachable_and_carries_no_text(self) -> None:
+        import http.client
+        import socket
+        for why in (urllib.error.URLError("https://studio.example.test refused"),
+                    socket.timeout("timed out"), ConnectionResetError(54, "reset"),
+                    http.client.RemoteDisconnected("closed"), ValueError("bad url")):
+            said = self.reach(why)
+            self.assertIsInstance(said, adapter.Unreachable, why)
+            self.assertNotIn("studio.example.test", str(said))
+            self.assertIn(type(why).__name__, str(said))
+
+    def test_a_redirect_is_never_followed_because_it_would_carry_the_token_along(self) -> None:
+        handler = adapter._NoRedirect()
+        request = urllib.request.Request("https://studio.example.test/x",
+                                         headers={"CF-Access-Client-Secret": THE_SECRET})
+        self.assertIsNone(handler.redirect_request(
+            request, None, 302, "Found", {}, "https://login.example.test/"))
+
+    def test_the_opener_is_built_with_the_handler_that_refuses_redirects(self) -> None:
+        seen: List[Any] = []
+
+        def building(*handlers: Any) -> Any:
+            seen.extend(handlers)
+            return self.Opener(self.Response(200, b"[]"))
+
+        with mock.patch.object(adapter.urllib.request, "build_opener", building):
+            adapter.studio_asks(THE_STUDIO, "GET", "/x", 1.0)
+        self.assertEqual([adapter._NoRedirect], seen)
+
+
+class WhereTheStudioIsGiven(unittest.TestCase):
+    """Three values kept like the token, read from the environment, and never half-trusted."""
+
+    def given(self, **named: Optional[str]) -> Any:
+        names = dict(zip(("base", "id", "secret"), adapter.STUDIO_FROM))
+        env = {names[key]: value for key, value in named.items() if value is not None}
+        with mock.patch.dict(os.environ, env):
+            for one in adapter.STUDIO_FROM:
+                if one not in env:
+                    os.environ.pop(one, None)
+            return adapter.the_studio()
+
+    def test_the_three_names_are_the_ones_the_docs_say_and_are_not_the_bots(self) -> None:
+        self.assertEqual(("WORKFLOW_STUDIO_BASE_URL", "WORKFLOW_STUDIO_ACCESS_CLIENT_ID",
+                          "WORKFLOW_STUDIO_ACCESS_CLIENT_SECRET"), adapter.STUDIO_FROM)
+        self.assertNotIn(adapter.TOKEN_FROM, adapter.STUDIO_FROM)
+
+    def test_none_given_is_no_studio_and_no_complaint(self) -> None:
+        self.assertEqual((None, ""), self.given())
+
+    def test_all_three_given_is_a_studio(self) -> None:
+        studio, why = self.given(base="https://studio.example.test/", id=" abc.access ",
+                                 secret=THE_SECRET)
+        self.assertEqual("", why)
+        self.assertEqual(("https://studio.example.test", "abc.access", THE_SECRET),
+                         (studio.base, studio.client_id, studio.client_secret))
+
+    def test_half_given_is_a_complaint_naming_what_is_missing_and_never_a_studio(self) -> None:
+        studio, why = self.given(base="https://studio.example.test", id="abc.access")
+        self.assertIsNone(studio)
+        self.assertIn(adapter.STUDIO_FROM[2], why)
+        self.assertNotIn(adapter.STUDIO_FROM[0], why)
+        studio, why = self.given(secret=THE_SECRET)
+        self.assertIsNone(studio)
+        self.assertIn(adapter.STUDIO_FROM[0], why)
+        self.assertNotIn(THE_SECRET, why)
+
+    def test_a_blank_value_is_not_a_value(self) -> None:
+        studio, why = self.given(base="https://studio.example.test", id="  ", secret=THE_SECRET)
+        self.assertIsNone(studio)
+        self.assertIn(adapter.STUDIO_FROM[1], why)
+
+    def test_which_addresses_a_token_may_be_sent_to(self) -> None:
+        good = ("https://studio.example.test", "https://studio.example.test/",
+                "https://studio.example.test:8443", "http://localhost:3000",
+                "http://127.0.0.1:8080", "http://[::1]:8080")
+        for one in good:
+            self.assertEqual("", adapter.studio_address_trouble(one), one)
+        bad = ("http://studio.example.test", "ftp://studio.example.test", "studio.example.test",
+               "https://", "https://user:pw@studio.example.test", "https://studio.example.test/api",
+               "https://studio.example.test/?x=1", "https://studio.example.test/#top",
+               "http://localhost.example.test", "")
+        for one in bad:
+            self.assertNotEqual("", adapter.studio_address_trouble(one), one)
+
+    def test_an_address_is_never_echoed_because_it_may_carry_a_password(self) -> None:
+        for written in ("https://user:hunter2@studio.example.test", "https://hunter2[studio.example.test",
+                        "http://studio.example.test/hunter2", "ftp://hunter2.example.test"):
+            said = adapter.studio_address_trouble(written)
+            self.assertNotEqual("", said, written)
+            self.assertNotIn("hunter2", said, written)
+            self.assertNotIn("studio.example.test", said, written)
+
+
+class WhatAChannelAddedWithAStudioDeclares(Bounded):
+    """`--check`, which is how rundesk learns the three names and the only place it learns them.
+
+    Declared only when asked for, because rundesk treats every declared name as required: a Discord
+    channel with no Studio must stay usable, and one added before this must read exactly as it did.
+    """
+
+    OPTION = "workflow-studio"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.setting({adapter.STUDIO_FROM[0]: None, adapter.STUDIO_FROM[1]: None,
+                      adapter.STUDIO_FROM[2]: None})
+        self.library = type("StudioLibrary", (Library,), {"Client": Checking})
+        adapter.discord = self.library
+        Checking.made = []
+        # The stand-in's intents carry no number, and what is under test is the declaration and not
+        # the mask — which `WhatIsAskedFor` checks against the named bits.
+        masking = mock.patch.object(adapter, "intents_now", lambda: None)
+        masking.start()
+        self.addCleanup(masking.stop)
+
+    def given(self) -> None:
+        self.setting({adapter.STUDIO_FROM[0]: "https://studio.example.test",
+                      adapter.STUDIO_FROM[1]: "synthetic-id.access",
+                      adapter.STUDIO_FROM[2]: THE_SECRET})
+
+    def test_it_takes_one_option_and_refuses_the_rest_in_words(self) -> None:
+        said = self.ran(["--check", "--room", "9930"])
+        self.assertIs(said["ok"], False)
+        self.assertIn(self.OPTION, said["why"])
+        self.assertIn("--room 9930", said["why"])
+        self.assertEqual([], Checking.made, "it signed in before it had understood the question")
+
+    def test_a_channel_with_no_studio_declares_the_token_alone_and_is_as_it_was(self) -> None:
+        said = self.ran(["--check"])
+        self.assertIs(said["ok"], True)
+        self.assertEqual({"env": ["DISCORD_BOT_TOKEN"]}, said["secret"])
+        self.assertEqual({}, said["settings"])
+        self.assertNotIn("workflow", said["describes"])
+
+    def test_asking_for_the_command_without_the_values_names_all_four_in_one_pass(self) -> None:
+        said = self.ran(["--check", self.OPTION])
+        self.assertIs(said["ok"], False)
+        self.assertEqual({"env": ["DISCORD_BOT_TOKEN", *adapter.STUDIO_FROM]}, said["secret"])
+        self.assertEqual([], Checking.made)
+
+    def test_with_no_token_either_all_four_are_still_asked_for_together(self) -> None:
+        self.setting({"DISCORD_BOT_TOKEN": ""})
+        said = self.ran(["--check", self.OPTION])
+        self.assertIs(said["ok"], False)
+        self.assertEqual({"env": ["DISCORD_BOT_TOKEN", *adapter.STUDIO_FROM]}, said["secret"])
+        self.assertIn("DISCORD_BOT_TOKEN", said["why"])
+
+    def test_the_values_given_declare_all_four_and_say_the_command_is_offered(self) -> None:
+        self.given()
+        said = self.ran(["--check", self.OPTION])
+        self.assertIs(said["ok"], True)
+        self.assertEqual({"env": ["DISCORD_BOT_TOKEN", *adapter.STUDIO_FROM]}, said["secret"])
+        self.assertEqual({"workflow_studio": True}, said["settings"])
+        self.assertIn("/workflow", said["describes"])
+
+    def test_test_and_doctor_ask_with_no_option_and_must_find_the_same_four(self) -> None:
+        # `channels test` and `channels doctor` hand over the recorded names and no options, so a
+        # channel added with the Studio is recognised by having been given its values.
+        self.given()
+        said = self.ran(["--check"])
+        self.assertIs(said["ok"], True)
+        self.assertEqual(["DISCORD_BOT_TOKEN", *adapter.STUDIO_FROM], said["secret"]["env"])
+        self.assertEqual({"workflow_studio": True}, said["settings"])
+
+    def test_half_given_is_refused_and_asks_again_for_all_of_them(self) -> None:
+        self.setting({adapter.STUDIO_FROM[0]: "https://studio.example.test"})
+        said = self.ran(["--check"])
+        self.assertIs(said["ok"], False)
+        self.assertIn(adapter.STUDIO_FROM[1], said["why"])
+        self.assertEqual(["DISCORD_BOT_TOKEN", *adapter.STUDIO_FROM], said["secret"]["env"])
+
+    def test_an_address_it_would_not_send_a_token_to_is_refused_and_never_echoed(self) -> None:
+        self.setting({adapter.STUDIO_FROM[0]: "http://user:hunter2@studio.example.test",
+                      adapter.STUDIO_FROM[1]: "synthetic-id.access",
+                      adapter.STUDIO_FROM[2]: THE_SECRET})
+        said = self.ran(["--check", self.OPTION])
+        self.assertIs(said["ok"], False)
+        self.assertNotIn("hunter2", json.dumps(said))
+        self.assertNotIn(THE_SECRET, json.dumps(said))
+        self.assertEqual([], Checking.made)
+
+    def test_checking_never_reaches_the_studio_and_never_prints_the_secret(self) -> None:
+        self.given()
+        with mock.patch.object(adapter, "studio_asks", side_effect=AssertionError("called")):
+            said = self.ran(["--check", self.OPTION])
+        self.assertIs(said["ok"], True)
+        self.assertNotIn(THE_SECRET, json.dumps(said))
+
+
+class WhatServeHandsTheConnection(Records):
+    """`serve` reads the three values once and gives them to the connection — or does not."""
+
+    def served(self, **env: Optional[str]) -> Any:
+        built: List[Any] = []
+
+        class Stub:
+            def __init__(self, allow: List[str], studio: Any = None, **_more: Any) -> None:
+                built.append((allow, studio))
+
+            async def run(self, token: str) -> int:
+                return 0
+
+        names = {"base": adapter.STUDIO_FROM[0], "id": adapter.STUDIO_FROM[1],
+                 "secret": adapter.STUDIO_FROM[2]}
+        given = {"DISCORD_BOT_TOKEN": "a-token", "RUNDESK_ALLOW": "22"}
+        given.update({names[key]: value for key, value in env.items() if value is not None})
+        caught = io.StringIO()
+        with mock.patch.dict(os.environ, given):
+            for key, name in names.items():
+                if env.get(key) is None:
+                    os.environ.pop(name, None)
+            with mock.patch.object(adapter, "Reaching", Stub), \
+                    contextlib.redirect_stdout(caught):
+                code = asyncio.run(adapter.serving())
+        self.code = code
+        self.records = [json.loads(one) for one in caught.getvalue().splitlines() if one.strip()]
+        return built
+
+    def test_a_studio_given_is_handed_to_the_connection(self) -> None:
+        ((allow, studio),) = self.served(base="https://studio.example.test", id="i.access",
+                                         secret=THE_SECRET)
+        self.assertEqual(["22"], allow)
+        self.assertEqual("https://studio.example.test", studio.base)
+
+    def test_none_given_hands_none_and_says_nothing(self) -> None:
+        ((_allow, studio),) = self.served()
+        self.assertIsNone(studio)
+        self.assertEqual([], self.noted(self.records))
+
+    def test_half_given_still_serves_and_says_why_the_command_is_missing(self) -> None:
+        ((_allow, studio),) = self.served(base="https://studio.example.test")
+        self.assertIsNone(studio)
+        self.assertEqual(0, self.code, "a Studio that is wrong must not stop the channel")
+        (said,) = self.noted(self.records)
+        self.assertIn("/workflow is not offered", said)
+        self.assertIn(adapter.STUDIO_FROM[1], said)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,12 @@ to ignore. A message from anybody else is dropped in silence, because replying t
 tell them they are a stranger confirms the agent is listening and spends the owner's tokens doing
 it.
 
+**The one command that is not rundesk's is `/workflow`**, which starts a released workflow in the
+Workflow Studio. It is offered only to a channel given the Studio's address and a service token, is
+forwarded to the Studio from here with the interaction held open, and never crosses the seam to
+rundesk at all: the Studio is the authority on who may start what, and decides again whatever this
+channel's own list says. See `the_studio`, `WORKFLOW` and the `Reaching._the_workflow` gesture.
+
 **Turn-answer splitting is rundesk's**, in one place, for every platform. The text handed to
 `deliver` is already inside `MAX_TEXT` and is never re-split here. Private interaction answers do
 not use that delivery path, so this adapter splits those into ordered ephemeral followups. The build
@@ -81,6 +87,7 @@ import datetime
 import errno
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -88,8 +95,12 @@ import signal
 import stat
 import sys
 import tempfile
+import threading
 import time
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -434,6 +445,67 @@ CONFIGURE = ("provider", "Change which brain answers for this agent")
 #: hang for ever for somebody who will correctly never be answered.
 NOT_YOURS = "This command is not available to you."
 
+#: The one gesture that is **not rundesk's**: starting a released workflow in the Workflow Studio.
+#: Every other command above is answered out of what an install already knows, by the process that
+#: reads this one's stdout. This one is answered by another program on another host, so it never
+#: crosses the seam at all — the interaction is held open here, forwarded there, and the answer is
+#: put back on the interaction that asked. It is offered only when the channel was given the
+#: Studio's address and a service token (see `the_studio`), and is otherwise not registered, so a
+#: channel that never opted in has no command that can only ever refuse.
+WORKFLOW = ("workflow", "Start a released workflow in the Workflow Studio")
+WORKFLOW_TITLE = "The workflow's title — start typing to see the ones that can be started"
+
+#: The three values `/workflow` needs, **kept like the bot token**: sealed in rundesk's store under
+#: this agent's own name, handed over under exactly these names, and never an argument. Declared to
+#: rundesk (in `secret.env`) only when the owner asked for the command with `STUDIO_OPTION`, because
+#: rundesk treats every name an adapter declares as required, and a Discord channel that has no
+#: Studio must still be usable without one.
+STUDIO_FROM = ("WORKFLOW_STUDIO_BASE_URL", "WORKFLOW_STUDIO_ACCESS_CLIENT_ID",
+               "WORKFLOW_STUDIO_ACCESS_CLIENT_SECRET")
+
+#: The only option this channel takes: `rundesk channels add ava discord --with workflow-studio`.
+#: **A bare word and not a flag**, because `--with` is itself an option and argparse reads a value
+#: that starts with `--` as another one (`expected one argument`) unless it holds a space.
+STUDIO_OPTION = "workflow-studio"
+
+#: Where the Studio answers (docs: the Studio's `discord-launch-contract`), and what is asked of it.
+LAUNCH_PATH = "/api/discord/launch"
+TITLES_PATH = "/api/discord/workflows"
+
+#: How long one launch call may take. Three of them, with the pauses between, still fit inside the
+#: fifteen minutes Discord keeps a deferred interaction open for.
+LAUNCH_WITHIN = 10.0
+
+#: The pause before each retry of the **same** interaction id — which is how many retries there
+#: are. The Studio answers a repeat of an id with the run it already made and never with a second
+#: one, so asking again is safe and is the only way to find out whether a call that failed in
+#: flight had reached it.
+LAUNCH_BACKOFF = (1.0, 2.0)
+
+#: How long a title suggestion may take. Discord gives an autocomplete three seconds, and an answer
+#: that arrives after that is dropped, so a slow Studio is answered with no suggestions at all.
+TITLES_WITHIN = 2.0
+
+#: The most suggestions Discord takes, and the longest one it takes — a title longer than this
+#: cannot be offered as a choice (a shortened one would not match the workflow), and is typed.
+TITLES_MOST = 25
+A_CHOICE_MOST = 100
+
+#: The longest title the Studio accepts, and the longest it reads of a filter.
+A_TITLE_MOST = 200
+
+#: How much of one Studio answer is read. Every answer the contract defines is a few hundred bytes.
+STUDIO_BODY_MOST = 64 * 1024
+
+#: What a person is told. Written once, and **none of them is ever built from a Studio message or
+#: body**: the contract's refusal is one fixed sentence that names nothing, and what is said here
+#: for every other state must not teach a stranger anything either.
+CANNOT_START = "That workflow can't be started from here."
+ALREADY_RUNNING = "That workflow is already running"
+NOT_NOW = "Workflows can't be started right now."
+UNCONFIRMED = ("I couldn't confirm whether that workflow started. Check the Workflow Studio for a "
+               "new run, or try again.")
+
 #: What an interaction says after Discord refused one of its continuation messages. A visible
 #: warning is the difference between a partial install-wide directory and one mistaken for whole.
 INCOMPLETE = "⚠️ This private response is incomplete. Please run the command again."
@@ -661,6 +733,217 @@ def who_may_reach() -> List[str]:
     answers everyone.
     """
     return [one for one in (os.environ.get("RUNDESK_ALLOW") or "").split(",") if one]
+
+
+# ---------------------------------------------------------------------------------------------
+# The Workflow Studio: where `/workflow` is forwarded, and nothing else about it is known here.
+#
+# **This does no reasoning.** Which title is startable, who may start it, whether it is already
+# running and what the run is called are all the Studio's, and every one of them arrives as a
+# status this file turns into a fixed sentence. The allow list this adapter holds only avoids
+# calling the Studio for somebody who can never be answered; the Studio decides again.
+# ---------------------------------------------------------------------------------------------
+
+
+class Studio:
+    """Where the Studio is and the service token that may call it.
+
+    **A class with a redacted `repr`, and that is the whole reason it is not a `NamedTuple`**: a
+    tuple's `repr` prints every field, and a traceback or a debugging line that printed this one
+    would put the Access secret in a log.
+    """
+
+    __slots__ = ("base", "client_id", "client_secret")
+
+    def __init__(self, base: str, client_id: str, client_secret: str) -> None:
+        self.base = base
+        self.client_id = client_id
+        self.client_secret = client_secret
+
+    def __repr__(self) -> str:
+        return "Studio(<configured>)"
+
+
+class Said(NamedTuple):
+    """What the Studio answered: the status, and the JSON body when it was one (`None` when not)."""
+
+    status: int
+    body: Any
+
+
+class Unreachable(Exception):
+    """The Studio gave no answer at all, so nothing is known about whether it did anything first.
+
+    Carries the *kind* of failure and never the exception's own text, which for a connection error
+    names the address it was reaching.
+    """
+
+
+def the_studio() -> Tuple[Optional[Studio], str]:
+    """The Studio this channel was given, and the sentence saying so when it was given badly.
+
+    `(Studio, "")` when all three values are there and usable, `(None, "")` when none was given,
+    and `(None, why)` when it was given half or wrongly. **The three states are kept apart** because
+    they lead to different places: not given is a channel that never asked for the command, and
+    half-given is a channel somebody meant to have it and that would otherwise silently lack it.
+    """
+    given = [(os.environ.get(one) or "").strip() for one in STUDIO_FROM]
+    if not any(given):
+        return None, ""
+    absent = [name for name, value in zip(STUDIO_FROM, given) if not value]
+    if absent:
+        return None, f"the workflow studio is only partly given — nothing set {', '.join(absent)}"
+    base, client_id, client_secret = given
+    trouble = studio_address_trouble(base)
+    if trouble:
+        return None, trouble
+    return Studio(base.rstrip("/"), client_id, client_secret), ""
+
+
+def studio_address_trouble(said: str) -> str:
+    """Why this is not an address a service token may be sent to, or `""` when it is.
+
+    **The address is never echoed**, because one with a password written into it is the likeliest
+    way a secret reaches a log. Plain `http` is for this machine only: a token sent across a network
+    in the clear is a token somebody else now holds.
+    """
+    try:
+        parts = urllib.parse.urlsplit(said)
+        host = parts.hostname or ""
+    except ValueError:
+        return f"{STUDIO_FROM[0]} is not an address"
+    if parts.scheme == "https":
+        pass
+    elif parts.scheme == "http" and host in ("localhost", "127.0.0.1", "::1"):
+        pass
+    else:
+        return (f"{STUDIO_FROM[0]} has to be an https address — plain http is only for this "
+                f"machine, because the service token travels with every call")
+    if not host or "@" in parts.netloc or parts.query or parts.fragment or parts.path.strip("/"):
+        return (f"{STUDIO_FROM[0]} has to be just the Studio's address, such as "
+                f"https://studio.example.com — no login, path, query or fragment")
+    return ""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow one. **A redirect would carry the service token to wherever it points.**
+
+    `urllib` copies a request's headers onto the one it follows, so an Access login redirect would
+    hand the secret to a second host. A redirect is reported as the status it is instead, which is
+    a refusal here like any other.
+    """
+
+    def redirect_request(self, *_given: Any, **_named: Any) -> None:
+        return None
+
+
+def studio_asks(studio: Studio, method: str, path: str, within: float,
+                query: Optional[Dict[str, str]] = None, body: Optional[Dict[str, str]] = None) -> Said:
+    """One call to the Studio, and what it answered. **Blocking, so never run on the event loop.**
+
+    Standard library only. Anything that is not an HTTP answer — a refused connection, a timeout, a
+    reset, a malformed reply — is `Unreachable`; anything that is one, whatever its status, is
+    returned as it came, because deciding what a status means is the caller's.
+    """
+    address = studio.base + path + (f"?{urllib.parse.urlencode(query)}" if query else "")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"CF-Access-Client-Id": studio.client_id,
+               "CF-Access-Client-Secret": studio.client_secret,
+               "Accept": "application/json",
+               # An edge that screens clients refuses `Python-urllib` by name.
+               "User-Agent": "rundesk-discord"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(address, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=within) as answer:
+            status, raw = answer.status, answer.read(STUDIO_BODY_MOST + 1)
+    except urllib.error.HTTPError as answer:
+        status = answer.code
+        try:
+            raw = answer.read(STUDIO_BODY_MOST + 1)
+        except (OSError, http.client.HTTPException):
+            raw = b""
+        finally:
+            answer.close()
+    except (OSError, http.client.HTTPException, ValueError) as why:
+        raise Unreachable(type(why).__name__) from None
+    try:
+        parsed = json.loads(raw.decode("utf-8")) if len(raw) <= STUDIO_BODY_MOST else None
+    except ValueError:
+        parsed = None
+    return Said(status, parsed)
+
+
+async def off_the_loop(work) -> Any:
+    """Run a blocking call on a thread of its own and wait for it without holding up the loop.
+
+    **A daemon thread per call rather than an executor.** An executor's threads are joined when the
+    interpreter exits, so a call hung on a dead socket would hold a stopping channel for as long as
+    that call's own timeout; a daemon thread is simply left behind. The loop that is waiting may be
+    gone by the time the call returns — a timeout, or a shutdown — and that is not an error.
+    """
+    loop = asyncio.get_running_loop()
+    waiting = loop.create_future()
+
+    def settle(result: Any, failure: Optional[BaseException]) -> None:
+        if waiting.done():
+            return
+        if failure is not None:
+            waiting.set_exception(failure)
+        else:
+            waiting.set_result(result)
+
+    def run() -> None:
+        try:
+            result, failure = work(), None
+        except Exception as why:           # noqa: BLE001 — handed to whoever is waiting
+            result, failure = None, why
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(settle, result, failure)
+
+    threading.Thread(target=run, name="studio", daemon=True).start()
+    return await waiting
+
+
+def launch_reply(said: Said) -> Optional[str]:
+    """What a person is told for one answer to a launch, or `None` for one worth asking again.
+
+    Only a 5xx is asked again: it means the run may or may not exist. **No sentence here is taken
+    from the answer's own text** — only its `title`, `version` and `url`, which is what the contract
+    says to relay, and the fixed sentences above for everything else.
+    """
+    body = said.body if isinstance(said.body, dict) else {}
+    if said.status in (200, 201):
+        title, version, url = body.get("title"), body.get("version"), body.get("url")
+        if isinstance(title, str) and isinstance(url, str) and title and url \
+                and isinstance(version, (int, str)) and not isinstance(version, bool):
+            return f"{title} · rev {version}\n{url}"
+        return UNCONFIRMED
+    problem = body.get("error") if isinstance(body.get("error"), dict) else {}
+    if said.status == 409:
+        details = problem.get("details") if isinstance(problem.get("details"), dict) else {}
+        url = details.get("url")
+        return f"{ALREADY_RUNNING} — {url}" if isinstance(url, str) and url else ALREADY_RUNNING
+    if said.status == 403 and problem.get("code") == "refused":
+        return CANNOT_START
+    if said.status >= 500:
+        return None
+    return NOT_NOW
+
+
+def title_choices(said: Said) -> List[Any]:
+    """The suggestions for a title, from what the Studio answered. Nothing for anything unexpected."""
+    if said.status != 200 or not isinstance(said.body, list):
+        return []
+    chosen: List[str] = []
+    for one in said.body:
+        title = one.get("title") if isinstance(one, dict) else None
+        if isinstance(title, str) and 0 < len(title) <= A_CHOICE_MOST and title not in chosen:
+            chosen.append(title)
+        if len(chosen) == TITLES_MOST:
+            break
+    return [discord.app_commands.Choice(name=one, value=one) for one in chosen]
 
 
 def flat(said: Any, most: int = SAID_MOST) -> str:
@@ -1295,10 +1578,16 @@ async def check(options: List[str]) -> int:
     diagnosis is the sentence that comes back: it says what was wrong rather than that something
     was.
     """
-    if options:
-        return _refused(f"this channel takes no options and was given {' '.join(options)} — a "
-                        f"channel here is a connection rather than a place, so there is nothing to "
-                        f"point it at and nothing to configure")
+    strange = [one for one in options if one != STUDIO_OPTION]
+    if strange:
+        return _refused(f"this channel takes one option, {STUDIO_OPTION}, and was given "
+                        f"{' '.join(strange)} — a channel here is a connection rather than a "
+                        f"place, so there is nothing to point it at")
+    # **Asked for by the option, and remembered by the values**: `test` and `doctor` ask with no
+    # options at all, so a channel that was added with the Studio is recognised by having been handed
+    # its values — which rundesk does only because they were declared on `add`.
+    studio, studio_trouble = the_studio()
+    wants_studio = STUDIO_OPTION in options or studio is not None or bool(studio_trouble)
     missing = the_library()
     if missing:
         return _refused(missing)
@@ -1308,7 +1597,11 @@ async def check(options: List[str]) -> int:
         # from *here* is what lets rundesk offer to take the token without any caller having to
         # match this sentence — a platform's words are this file's, and a caller that string-matched
         # them would be the seam failing.
-        return _refused(f"there is no bot token — nothing set {TOKEN_FROM}", secret=True)
+        return _refused(f"there is no bot token — nothing set {TOKEN_FROM}", secret=True,
+                        studio=wants_studio)
+    if wants_studio and studio is None:
+        return _refused(studio_trouble or f"the workflow studio needs {', '.join(STUDIO_FROM)}",
+                        secret=True, studio=True)
     allow = who_may_reach()
     if not allow:
         return _refused("nothing said who may reach this agent, so there is nobody to open a "
@@ -1354,21 +1647,26 @@ async def check(options: List[str]) -> int:
     # is a room that goes on being answered in rather than anything that looks like a failure.
     found = {"ok": True,
              "describes": f"{client.user}, reaching {person} — a bot already in a server has to be "
-                          f"sent this invite again before it may open a thread in a room",
+                          f"sent this invite again before it may open a thread in a room"
+                          + (" — and offering /workflow" if wants_studio else ""),
              "notify_place": str(place.id),
-             "settings": {},
-             "secret": {"env": [TOKEN_FROM]},
+             "settings": {"workflow_studio": True} if wants_studio else {},
+             "secret": {"env": [TOKEN_FROM, *STUDIO_FROM] if wants_studio else [TOKEN_FROM]},
              "invite": invited(client.application_id or client.user.id)}
     await _quietly(client.close)
     say(found)
     return 0
 
 
-def _refused(why: str, secret: bool = False) -> int:
-    """One shape for every way this comes back no, so that no path here has to build one."""
+def _refused(why: str, secret: bool = False, studio: bool = False) -> int:
+    """One shape for every way this comes back no, so that no path here has to build one.
+
+    `studio` adds the Studio's three names to the one the token is read from, so that everything an
+    owner is to be asked for is asked for in one pass.
+    """
     said = {"ok": False, "why": why}
-    if secret:
-        said["secret"] = {"env": [TOKEN_FROM]}
+    if secret or studio:
+        said["secret"] = {"env": [TOKEN_FROM, *STUDIO_FROM] if studio else [TOKEN_FROM]}
     say(said)
     return 0
 
@@ -1472,8 +1770,16 @@ class Reaching:
     been up the longest.
     """
 
-    def __init__(self, allow: List[str]) -> None:
+    def __init__(self, allow: List[str], studio: Optional[Studio] = None,
+                 transport: Any = None, pause: Any = None) -> None:
         self.allow = allow
+        #: Where `/workflow` is forwarded, or `None`, in which case the command is not offered.
+        self.studio = studio
+        #: How the Studio is called and how a retry waits, **each replaceable and neither bound as a
+        #: default**: the real ones are resolved when a call is made, so a suite hands in its own and
+        #: nothing reaches a network or sleeps.
+        self.transport = transport
+        self.pause = pause
         self.client = None
         #: The mark now standing on a message, so the next one can be added before it is taken away.
         self.marks: Dict[str, str] = {}
@@ -2204,6 +2510,12 @@ class Reaching:
         self.tree.add_command(discord.app_commands.Command(
             name=CONFIGURE[0], description=CONFIGURE[1], nsfw=False,
             callback=self._the_provider()))
+        if self.studio is not None:
+            workflow = discord.app_commands.Command(
+                name=WORKFLOW[0], description=WORKFLOW[1], nsfw=False,
+                callback=self._the_workflow())
+            workflow.autocomplete("title")(self._titles_offered())
+            self.tree.add_command(workflow)
 
     async def _synced(self) -> None:
         """Offer the commands to Discord. **Global, and once per connection is too often.**
@@ -2281,7 +2593,90 @@ class Reaching:
             provider="Which brain answers — a provider name, or a path to one",
             alias="An additional account alias; omit for the provider default")(gestured)
 
-    async def _may(self, interaction: Any) -> bool:
+    def _the_workflow(self):
+        """The gesture that starts a workflow, and the only one answered by somebody else's service."""
+        async def gestured(interaction: Any, title: str) -> None:
+            # Told what the Studio itself would tell a stranger — the same sentence — so that
+            # nothing here teaches anybody which side refused them.
+            if not await self._may(interaction, CANNOT_START):
+                return
+            # **Held open first and always, inside Discord's three seconds**; everything that can be
+            # slow comes after it. The answer is then put back through `_answered`, as any other
+            # gesture's is, and so is split and warned about the same way.
+            if not await self._deferred(interaction):
+                return
+            await self._answered({"ref": str(interaction.id), "text": await self._launched(
+                str(interaction.id), str(interaction.user.id), title)})
+        gestured.__annotations__ = {"interaction": Any, "title": str}
+        return discord.app_commands.describe(title=WORKFLOW_TITLE)(gestured)
+
+    def _titles_offered(self):
+        """The suggestions for `title`, which is the one place a slow Studio must cost nothing."""
+        async def completing(interaction: Any, current: str) -> List[Any]:
+            # Silent for somebody this channel does not allow: a suggestion cannot be refused in
+            # words, and a list of titles shown to a stranger is exactly what the Studio withholds.
+            if str(interaction.user.id) not in self.allow:
+                return []
+            studio, asks = self.studio, self.transport or studio_asks
+            query = {"userId": str(interaction.user.id)}
+            if current:
+                query["q"] = current[:A_TITLE_MOST]
+            try:
+                said = await asyncio.wait_for(
+                    off_the_loop(lambda: asks(studio, "GET", TITLES_PATH, TITLES_WITHIN,
+                                              query=query)),
+                    TITLES_WITHIN)
+            except Exception:              # noqa: BLE001 — no suggestions is the whole answer
+                return []
+            return title_choices(said)
+        return completing
+
+    async def _launched(self, interaction_id: str, user_id: str, title: str) -> str:
+        """Ask the Studio to start one run, and say what came of it. **Never raises.**
+
+        The interaction id is the Studio's idempotency key and the user id is who it is asking on
+        behalf of; the title is passed exactly as typed, and nothing else about the person goes.
+        A title the Studio could never accept is refused here in the Studio's own words rather than
+        sent to be refused.
+
+        **One body for every attempt**, so a retry is the same request and the Studio answers it with
+        the run it already made. A 5xx or no answer is asked again after a pause, twice at most, and
+        what is then said is that it could not be confirmed — never that it failed, because the run
+        may exist.
+        """
+        if not title.strip() or len(title) > A_TITLE_MOST:
+            return CANNOT_START
+        studio, asks = self.studio, self.transport or studio_asks
+        pausing = self.pause or asyncio.sleep
+        body = {"interactionId": interaction_id, "discordUserId": user_id, "title": title}
+        for attempt in range(len(LAUNCH_BACKOFF) + 1):
+            if attempt:
+                await pausing(LAUNCH_BACKOFF[attempt - 1])
+            try:
+                said = await off_the_loop(
+                    lambda: asks(studio, "POST", LAUNCH_PATH, LAUNCH_WITHIN, body=body))
+            except Exception as why:       # noqa: BLE001 — nothing here is allowed to leave a person waiting
+                noted(f"workflow: the studio gave no answer ({type(why).__name__}), attempt "
+                      f"{attempt + 1} of {len(LAUNCH_BACKOFF) + 1}")
+                continue
+            text = launch_reply(said)
+            if text == UNCONFIRMED:
+                noted(f"workflow: the studio answered {said.status} with something that could not "
+                      f"be read as a launched run")
+            if text is None:
+                noted(f"workflow: the studio answered {said.status}, attempt {attempt + 1} of "
+                      f"{len(LAUNCH_BACKOFF) + 1}")
+                continue
+            if text == NOT_NOW:
+                # Only the status. An answer that is not one the contract describes is somebody's
+                # setup to fix — a token not on the policy, an address that is wrong — and the body
+                # is never written down.
+                noted(f"workflow: the studio answered {said.status}, which is not an answer to a "
+                      f"launch — check the service token and the address", "error")
+            return text
+        return UNCONFIRMED
+
+    async def _may(self, interaction: Any, said: str = NOT_YOURS) -> bool:
         """Whether this gesture is worth reporting at all. **Advisory, and never the decision.**
 
         Rundesk refuses a stranger again on its own side and answers them with silence, which is the
@@ -2293,7 +2688,7 @@ class Reaching:
         if str(interaction.user.id) in self.allow:
             return True
         with contextlib.suppress(Exception):
-            await interaction.response.send_message(NOT_YOURS, ephemeral=True)
+            await interaction.response.send_message(said, ephemeral=True)
         return False
 
     async def _said_back(self, interaction: Any, said: str) -> bool:
@@ -2580,8 +2975,13 @@ async def serving() -> int:
         # loud, because a channel that is deaf by configuration looks exactly like a broken one.
         noted("nothing said who may reach this agent, so nothing said here will be answered",
               "error")
+    studio, studio_trouble = the_studio()
+    if studio_trouble:
+        # Said, and the channel still serves: a Studio that is wrong costs `/workflow` and nothing
+        # else, and an agent that stopped answering for it would be a worse fault than the one named.
+        noted(f"{studio_trouble} — /workflow is not offered", "error")
     try:
-        return await Reaching(allow).run(token)
+        return await Reaching(allow, studio).run(token)
     except Refused as why:
         noted(str(why), "error")
         return WILL_NOT_FIX

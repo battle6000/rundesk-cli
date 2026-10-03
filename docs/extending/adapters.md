@@ -237,6 +237,13 @@ is started without your credential, and your `--check` refusal naming the variab
 sees. You are handed the value under the name you declared, exactly as before. An adapter that wants
 two credentials is still an adapter that declares two names.
 
+**Every name you declare is required.** `channels doctor` reports a channel `BLOCKED` while any
+declared name holds nothing, and `add` prompts for each name a *refusal* lists. A credential that only
+one feature needs therefore belongs on the `ok: true` answer to an option that asks for that feature,
+and on the refusal that answers the same option, so the channel stays usable for everybody who never
+asked. The shipped Discord adapter does this for `--with workflow-studio`: it declares the Studio's
+three names beside the token, and only then. It accepts exactly that one option and refuses any other.
+
 ### `serve`
 
 **argv:** exactly `serve`.

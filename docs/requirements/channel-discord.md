@@ -1,7 +1,7 @@
 ---
 id: DIS
 name: Discord, as an agent is reached on it
-last_verified: 2026-09-03
+last_verified: 2026-10-03
 ---
 
 ## What this is
@@ -23,8 +23,9 @@ command responses, and file uploads.
 
 A ✅ names the test methods that cite the requirement and were observed to pass on 2026-09-02 —
 `test_channels_discord.py`, `test_channels_delivery.py`, `test_channels_hosting.py`, and
-`test_providers_answering.py`, 402 tests across the four. A ❌ carries the acceptance that has not
-been executed. Offline scenarios cannot prove what Discord's own service displayed.
+`test_providers_answering.py`, 402 tests across the four. **R-DIS-59 to R-DIS-67 were observed to
+pass on 2026-10-03 in `test_channels_discord.py` alone, 309 tests.** A ❌ carries the acceptance that
+has not been executed. Offline scenarios cannot prove what Discord's own service displayed.
 
 |  | ID | Requirement | Evidence |
 |:--:|---|---|---|
@@ -85,6 +86,16 @@ been executed. Offline scenarios cannot prove what Discord's own service display
 | ✅ | R-DIS-54 | The bot credential never reaches the file host, and this bot's own messages never come back as results. | `test_the_credential_does_not_go_to_the_file_host`, `test_this_bots_own_messages_never_come_back` |
 | ✅ | R-DIS-58 | An arrival carries Discord's own `<@id>` handle for whoever spoke, beside their display name, so an agent can mention them back. | `test_it_hands_over_the_handle_that_mentions_whoever_spoke` |
 | ❌ | R-DIS-55 | A search really reaches a live Discord server, a server still indexing really answers as one, and a fetched attachment really arrives. | not proven — no live server, application or credential was used, and none is permitted. Exercise an unscoped search, one scoped to a channel and to a private conversation, a window, a newly-created server whose index is not built, and a `--fetch` of a real attachment. |
+| ✅ | R-DIS-59 | `/workflow title:<title>` is offered only by a channel that was given the Workflow Studio's address and a service token; every other channel registers the commands it always had and no command that could only refuse. | `test_it_is_offered_with_a_studio_and_its_title_is_suggested`, `test_it_is_not_offered_by_a_channel_that_has_no_studio` |
+| ✅ | R-DIS-60 | The interaction is held open, privately, before the Studio is asked, and the Studio is never called or waited for on the event loop that serves every other interaction and reads rundesk; a call still in flight at shutdown does not hold the process. | `test_discord_is_answered_before_the_studio_is_asked`, `test_a_slow_studio_does_not_hold_the_event_loop`, `test_a_call_still_running_when_the_loop_ends_does_not_hold_the_process` |
+| ✅ | R-DIS-61 | The Studio is sent the Discord interaction id, the invoking user's id and the title exactly as typed, and nothing else about the person; a title it could never accept is refused here without a call. | `test_only_the_interaction_the_user_and_the_title_are_sent`, `test_the_title_goes_exactly_as_it_was_typed`, `test_a_title_the_studio_could_never_accept_is_not_sent_to_be_refused` |
+| ✅ | R-DIS-62 | Each Studio answer becomes one fixed private reply: the title, `rev <version>` and link for a started or repeated run; the one refusal sentence for a 403 `refused`; "already running" with the existing link for a 409; and "can't be started right now" for any other status. No sentence is taken from the Studio's own text, and a 403 that is not the refusal is never shown as one. | `test_a_started_run_says_its_title_its_release_and_where_to_watch_it`, `test_a_refusal_is_the_one_sentence_the_contract_gives`, `test_a_workflow_already_running_says_so_and_where`, `test_a_conflict_with_no_link_still_says_it_is_running`, `test_what_is_not_a_launch_answer_is_not_now_and_is_never_asked_again`, `test_a_forbidden_403_is_not_taken_for_the_refusal`, `test_a_success_it_cannot_read_is_not_a_success_it_invents`, `test_the_studios_own_words_are_never_relayed` |
+| ✅ | R-DIS-63 | A 5xx or no answer at all is asked again twice at most with the same interaction id, after a short pause, and then said to be unconfirmed rather than failed; an answer that is not a 5xx is never asked again; nothing leaves the interaction unanswered. | `test_a_retry_is_the_same_interaction_the_same_user_and_the_same_title`, `test_it_waits_a_little_before_each_retry_and_never_before_the_first_call`, `test_two_retries_and_then_it_says_it_could_not_confirm`, `test_a_refusal_is_final_and_is_not_asked_for_again`, `test_a_call_that_breaks_in_an_unforeseen_way_still_answers` |
+| ✅ | R-DIS-64 | A user this channel does not allow is shown the Studio's own refusal sentence, so a stranger and a user the Studio refuses see the same words, and the Studio is not called; the channel's list only avoids a call and is never the decision. | `test_a_stranger_is_told_what_the_studio_would_tell_them_and_nothing_is_called`, `test_somebody_the_studio_refuses_is_told_exactly_what_a_stranger_is`, `test_this_channels_list_is_not_a_second_source_of_truth` |
+| ✅ | R-DIS-65 | The `title` option suggests at most 25 titles the Studio returns, only titles a choice can hold, from one call limited to two seconds; any failure, timeout or unexpected answer, and any user this channel does not allow, gets no suggestions and no call. | `test_the_studios_titles_are_offered_as_they_are`, `test_only_the_user_and_what_was_typed_are_sent`, `test_at_most_twenty_five_are_offered_even_if_more_come_back`, `test_a_title_is_offered_once_and_only_if_it_fits_a_choice`, `test_nothing_unexpected_becomes_a_suggestion`, `test_no_suggestions_on_any_failure`, `test_no_suggestions_when_the_studio_is_too_slow`, `test_a_stranger_is_offered_nothing_and_nothing_is_asked` |
+| ✅ | R-DIS-66 | The Access secret appears in no reply, log record, note, address or `repr`; a Studio's body is never logged; a redirect is never followed because it would carry the secret to another host; and only an `https` address, or `http` on this machine, with no login, path, query or fragment, is accepted — and never echoed back. | `test_the_secret_is_never_in_what_is_said_or_logged_or_shown`, `test_what_the_studio_wrote_is_never_in_a_log_line`, `test_the_secret_is_never_in_the_address`, `test_checking_never_reaches_the_studio_and_never_prints_the_secret`, `test_a_redirect_is_never_followed_because_it_would_carry_the_token_along`, `test_the_opener_is_built_with_the_handler_that_refuses_redirects`, `test_which_addresses_a_token_may_be_sent_to`, `test_an_address_is_never_echoed_because_it_may_carry_a_password` |
+| ✅ | R-DIS-67 | The Studio's three values are declared to rundesk beside the bot token only when `--with workflow-studio` asks for them or they were already given, so a channel without a Studio declares the token alone and stays usable; they are asked for together in one pass; `--check` without the option recognises a channel that has them; half-given values or a bad address refuse in words without naming a value; and `serve` that finds them wrong still serves, without the command. | `test_it_takes_one_option_and_refuses_the_rest_in_words`, `test_a_channel_with_no_studio_declares_the_token_alone_and_is_as_it_was`, `test_asking_for_the_command_without_the_values_names_all_four_in_one_pass`, `test_with_no_token_either_all_four_are_still_asked_for_together`, `test_the_values_given_declare_all_four_and_say_the_command_is_offered`, `test_test_and_doctor_ask_with_no_option_and_must_find_the_same_four`, `test_half_given_is_refused_and_asks_again_for_all_of_them`, `test_a_studio_given_is_handed_to_the_connection`, `test_half_given_still_serves_and_says_why_the_command_is_missing` |
+| ❌ | R-DIS-68 | `/workflow` and its title suggestions really register under discord.py 2.7.1, appear in a server, and start, repeat, refuse and report a run against a live Workflow Studio behind Cloudflare Access. | not proven — no Discord application, Studio or Access token was used, and none is permitted. Register the command, then exercise a started, a repeated, a refused, a running and an unreachable-Studio case, a stranger, and suggestions, from a real account; and run `channels add --with workflow-studio`, `test` and `doctor` against a real install. |
 
 ## Open questions
 
@@ -93,3 +104,7 @@ been executed. Offline scenarios cannot prove what Discord's own service display
 - Whether `R-DIS-18` was withdrawn deliberately. The numbering skips it.
 - Out of scope, and deliberately: Slack, per-place channel configuration, and any presentation
   that would change what a turn means rather than how it looks.
+- Whether the Studio's service token should be withheld from the environment of an agent's turns the
+  way an OAuth client is (`secrets.withheld`). It is not: a provider is handed every ordinary value
+  the install keeps, so any agent on the install can read it, and the Studio's own role check is then
+  the only limit on what that token can do.
